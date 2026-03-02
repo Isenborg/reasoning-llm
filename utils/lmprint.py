@@ -1,33 +1,80 @@
-# utils.py
-from transformers import TextStreamer
+import re
 from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
+from rich.rule import Rule
 
-class PrettyStreamer(TextStreamer):
-    def __init__(self, tokenizer, **kwargs):
-        super().__init__(tokenizer, **kwargs)
-        self.console = Console(force_terminal=True)
-        self.in_think = False
+console = Console()
 
-    def on_finalized_text(self, text: str, stream_end: bool = False):
-        """Called when a new chunk of text is ready to be printed."""
-        # Check for tags in the text chunk
-        if "<think>" in text:
-            self.in_think = True
-            # Print the header for thinking
-            self.console.print("\n[bold cyan]🤔 THOUGHT PROCESS:[/bold cyan]")
-            text = text.replace("<think>", "")
+def response(raw_output: str):
+    """
+    Parses an LLM output containing <think> and <answer> tags
+    and renders it beautifully using Rich.
+    """
 
-        if "</think>" in text:
-            self.in_think = False
-            # Print the header for the answer
-            text = text.replace("</think>", "")
-            self.console.print("\n\n[bold green]✅ FINAL ANSWER:[/bold green]")
+    think_match = re.search(r'<think>(.*?)</think>', raw_output, flags=re.DOTALL | re.IGNORECASE)
+    answer_match = re.search(r'<answer>(.*?)</answer>', raw_output, flags=re.DOTALL | re.IGNORECASE)
 
-        # Style the text based on current state
-        if self.in_think:
-            self.console.print(f"[italic cyan]{text}[/italic cyan]", end="")
-        else:
-            self.console.print(text, end="")
+    # --- 1. Thinking Section ---
+    if think_match:
+        think_text = think_match.group(1).strip()
 
-        if stream_end:
-            self.console.print("\n" + "—"*30 + "\n")
+        console.print()
+        console.print(
+            Panel(
+                Markdown(think_text),
+                title="[dim italic]🤔 Thinking...[/dim italic]",
+                title_align="left",
+                border_style="dim",
+                style="dim italic",
+                padding=(1, 2),
+            )
+        )
+
+    # --- 2. Answer Section ---
+    if answer_match:
+        answer_text = answer_match.group(1).strip()
+
+        console.print()
+        console.print(
+            Panel(
+                Markdown(answer_text),
+                title="[bold green]💡 Answer[/bold green]",
+                title_align="left",
+                border_style="green",
+                padding=(1, 2),
+            )
+        )
+        console.print()
+
+    # --- 3. Fallbacks ---
+    elif think_match and not answer_match:
+        # Grab whatever text exists outside the <think> tags
+        leftover = re.sub(r'<think>.*?</think>', '', raw_output, flags=re.DOTALL | re.IGNORECASE).strip()
+        if leftover:
+            console.print()
+            console.print(
+                Panel(
+                    Markdown(leftover),
+                    title="[bold green]💡 Answer[/bold green]",
+                    title_align="left",
+                    border_style="green",
+                    padding=(1, 2),
+                )
+            )
+            console.print()
+
+    elif not think_match and not answer_match:
+        # No tags found — just render the raw output as Markdown
+        console.print()
+        console.print(
+            Panel(
+                Markdown(raw_output.strip()),
+                title="[bold blue]📝 Response[/bold blue]",
+                title_align="left",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+        console.print()
