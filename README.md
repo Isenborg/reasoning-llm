@@ -1,4 +1,4 @@
-# reasoning-llm
+# Practice is All You Need
 
 Exploring emergent reasoning capabilities in small language models for math solving. We compare three approaches:
 
