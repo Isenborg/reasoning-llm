@@ -1,0 +1,39 @@
+# Virtual environments
+venv/
+.venv/
+env/
+rlvr/
+.env/
+
+# Model downloads & checkpoints
+models/
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+.cache/
+hf_cache/
+huggingface/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Misc
+.DS_Store
+*.log
