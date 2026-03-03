@@ -13,7 +13,11 @@ Exploring emergent reasoning capabilities in small language models for math solv
    ```bash
    pip install -r requirements.txt
    ```
-3. To use the `rlvr` kernel in Jupyter notebooks, run:
+* If working on a lab computer, it is reccomended to use the venv from `TDDE09` instead to save memory:
+   ```bash
+   source /courses/TDDE09/venv/bin/activate
+   ```
+3. To use the kernel in Jupyter notebooks, run:
    ```bash
    python -m ipykernel install --user --name rlvr --display-name "rlvr"
    ```
