@@ -94,6 +94,7 @@ GENERATORS = [format_simple_equation, format_word_problem, format_multi_step]
 # Dataset that generates on the fly
 # ============================================================
 from torch.utils.data import Dataset
+import torch
 
 class RandomFormatSFTDataset(Dataset):
     def __init__(self, tokenizer, prompt_template, size=200, seed=42):
@@ -124,17 +125,3 @@ class RandomFormatSFTDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
-
-
-# ============================================================
-# Preview some examples
-# ============================================================
-rng = random.Random(42)
-print("Sample generated examples:\n")
-for i in range(10):
-    gen = rng.choice(GENERATORS)
-    q, t, a = gen(rng)
-    print(f"Q: {q}")
-    print(f"<think>\n{t}\n</think>")
-    print(f"<answer>{a}</answer>")
-    print("---")
