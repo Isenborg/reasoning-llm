@@ -43,9 +43,6 @@ def generate_completions(model, tokenizer, prompt_texts: list[str], G, max_new_t
 def get_per_token_logps(model, input_ids, attention_mask, **kwargs):
     """Return per-token log probabilities for each position in a single sequence."""
     outputs = model(input_ids)
-
-    
-
     pass
 
 
