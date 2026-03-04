@@ -107,10 +107,12 @@ class RandomFormatSFTDataset(Dataset):
 
             prompt = f"{prompt_template(question)}\n"
             completion = f"<think>\n{thinking}\n</think>\n<answer>{answer}</answer>"
-            full_text = prompt + completion
 
-            full_ids = tokenizer.encode(full_text, add_special_tokens=False)
+            # Encode prompt and completions separately, so that we dont get tokens at the border.
             prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+            completion_ids = tokenizer.encode(completion, add_special_tokens=False)
+
+            full_ids = prompt_ids + completion_ids
 
             labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids):]
 
