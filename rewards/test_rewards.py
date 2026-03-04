@@ -1,54 +1,76 @@
-import pytest
+import unittest
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils import checks
+from utils import extracts
+import rewards
 
-from rewards import rewards
+class TestFormattingChecks(unittest.TestCase):
+    
+    def test_single_thinking_block(self):
+        # Perfect case
+        self.assertTrue(checks.check_single_thinking_block("<think>Thinking...</think>"))
+        # Double tags (should fail)
+        self.assertFalse(checks.check_single_thinking_block("<think>One</think><think>Two</think>"))
+        # Missing tags
+        self.assertFalse(checks.check_single_thinking_block("Just some text"))
 
+    def test_single_answer_block(self):
+        # Perfect case
+        self.assertTrue(checks.check_single_answer_block("<answer>42</answer>"))
+        # Double tags
+        self.assertFalse(checks.check_single_answer_block("<answer>42</answer> Wait, <answer>43</answer>"))
 
-def test_format_and_correct_answer():
-    text = "<think>2+2=4</think><answer>4</answer>"
-    # default weights give full reward when both format and correctness are
-    # satisfied with a matching ground truth
-    assert rewards.calculate_reward(text, ground_truth="4") == pytest.approx(1.0)
-
-
-def test_wrong_answer_penalty():
-    text = "<think>2+2=4</think><answer>5</answer>"
-    # format counts for 0.3, wrong answer adds 0.1*0.7 = 0.07
-    expected = 0.3 + 0.07
-    assert rewards.calculate_reward(text, ground_truth="4") == pytest.approx(expected)
-
-
-def test_no_tags_returns_zero():
-    text = "just some text without tags"
-    assert rewards.calculate_reward(text) == 0.0
-
-
-def test_partial_format_answer_only():
-    text = "some reasoning<answer>4</answer>"
-    # half of format weight (0.3 * 0.5)
-    assert rewards.calculate_reward(text) == pytest.approx(0.15)
-
-
-def test_partial_format_think_only():
-    text = "<think>I am thinking</think>"
-    assert rewards.calculate_reward(text) == pytest.approx(0.15)
+    def test_no_preamble(self):
+        # Perfect case
+        self.assertTrue(checks.check_no_text_before_think("<think>Thinking...</think>"))
+        # Allowed whitespace/newlines
+        self.assertTrue(checks.check_no_text_before_think("   \n\n <think>Thinking...</think>"))
+        # Forbidden text before tag
+        self.assertFalse(checks.check_no_text_before_think("Sure, here is the answer: <think>Thinking...</think>"))
 
 
-def test_no_ground_truth_consumes_only_format():
-    text = "<think>2+2=4</think><answer>4</answer>"
-    # without ground truth only the format component is counted
-    assert rewards.calculate_reward(text, ground_truth=None) == pytest.approx(0.3)
+class TestCalculateReward(unittest.TestCase):
 
+    def setUp(self):
+        # Default weights from our function to calculate expected scores
+        self.format_weight = 0.3
+        self.correctness_weight = 0.7
+        self.ground_truth = "136"
 
-def test_compute_reward_wrapper():
-    text = "<think>foo</think><answer>bar</answer>"
-    # compute_reward should mirror calculate_reward exactly
-    assert rewards.compute_reward(text, ground_truth="bar") == rewards.calculate_reward(
-        text, ground_truth="bar"
-    )
+    def test_perfect_output(self):
+        text = "<think>Calculating...</think><answer>136</answer>"
+        expected_reward = self.format_weight + self.correctness_weight # 1.0
+        
+        score = rewards.calculate_reward(text, self.ground_truth)
+        self.assertAlmostEqual(score, expected_reward)
 
+    def test_format_perfect_wrong_answer(self):
+        text = "<think>Calculating...</think><answer>999</answer>"
+        # Should get full format points, plus the 0.1 penalty multiplier for a wrong answer
+        expected_reward = self.format_weight + (self.correctness_weight * 0.1)
+        
+        score = rewards.calculate_reward(text, self.ground_truth)
+        self.assertAlmostEqual(score, expected_reward)
 
-def test_weight_override():
-    text = "<think>x</think><answer>y</answer>"
-    # override the weights to give equal emphasis and ensure we still cap at 1
-    r = rewards.compute_reward(text, ground_truth="y", format_weight=0.5, correctness_weight=0.5)
-    assert r == pytest.approx(1.0)
+    def test_preamble_penalty(self):
+        text = "Let's solve this. <think>Calculating...</think><answer>136</answer>"
+        # Fails the no_preamble check, so it misses the full format reward.
+        # It should still trigger the partial answer reward (0.5 * format_weight)
+        # Plus full correctness points.
+        expected_reward = (self.format_weight * 0.5) + self.correctness_weight
+        
+        score = rewards.calculate_reward(text, self.ground_truth)
+        self.assertAlmostEqual(score, expected_reward)
+
+    def test_multiple_thinking_blocks_penalty(self):
+        text = "<think>Step 1</think><think>Step 2</think><answer>136</answer>"
+        # Fails single thinking block. Only gets partial answer format points + correctness.
+        expected_reward = (self.format_weight * 0.5) + self.correctness_weight
+        
+        score = rewards.calculate_reward(text, self.ground_truth)
+        self.assertAlmostEqual(score, expected_reward)
+
+if __name__ == "__main__":
+    unittest.main()

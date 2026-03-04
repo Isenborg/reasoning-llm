@@ -33,3 +33,39 @@ def started_thinking_but_failed(text: str) -> bool:
     has_start = bool(re.search(r"<think>", text, flags=re.IGNORECASE))
     has_end = bool(re.search(r"</think>", text, flags=re.IGNORECASE))
     return has_start and not has_end
+
+def check_single_thinking_block(text: str, tag: str = "think") -> bool:
+    """
+    Checks if the output contains exactly one thinking block.
+    Returns True if exactly one opening and one closing tag exist.
+    """
+    open_tag = f"<{tag}>"
+    close_tag = f"</{tag}>"
+    
+    return text.count(open_tag) == 1 and text.count(close_tag) == 1
+
+def check_single_answer_block(text: str, tag: str = "answer") -> bool:
+    """
+    Checks if the output contains exactly one answer block.
+    Returns True if exactly one opening and one closing tag exist.
+    """
+    open_tag = f"<{tag}>"
+    close_tag = f"</{tag}>"
+    
+    return text.count(open_tag) == 1 and text.count(close_tag) == 1
+
+def check_no_text_before_think(text: str, tag: str = "think") -> bool:
+    """
+    Checks that there is no text before the opening thinking tag.
+    Allows leading whitespace or newlines.
+    """
+    open_tag = f"<{tag}>"
+    tag_index = text.find(open_tag)
+    
+    # If the tag isn't found, the condition of "no text before it" is technically 
+    # met, or we might want it to fail depending on our strictness. 
+    if tag_index == -1:
+        return False 
+        
+    # Check if a stripped version of the text before the tag is empty
+    return text[:tag_index].strip() == ""
