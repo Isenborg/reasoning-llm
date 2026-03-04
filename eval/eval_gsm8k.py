@@ -1,6 +1,7 @@
 import re
 from collections import Counter
 
+import math
 import torch
 from datasets import load_dataset
 
@@ -47,14 +48,26 @@ def extract_answer_tag_int(text: str) -> int | None:
 
 
 def extract_predicted_int(text: str) -> int | None:
-    # 1) Prefer answer-tag extraction
-    v = extract_answer_tag_int(text)
-    if v is not None:
-        return v
+    # Prefer <answer>...</answer>
+    m = re.search(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        inner = m.group(1)
+    else:
+        inner = text
 
-    # 2) Fallback: last integer anywhere
-    nums = re.findall(r"-?\d+", text)
-    return int(nums[-1]) if nums else None
+    # Find last number that can be int/float, allowing $, commas, etc.
+    nums = re.findall(r"-?\d+(?:\.\d+)?", inner.replace(",", ""))
+    if not nums:
+        return None
+
+    x = float(nums[-1])
+
+    # GSM8K answers are integers; accept example 18.0
+    if abs(x - round(x)) < 1e-6:
+        return int(round(x))
+
+    # If it's not an integer, return None
+    return None
 
 
 def majority_vote(values: list[int | None]) -> int | None:
