@@ -96,3 +96,7 @@ def render_panel(content, title, color, style):
             padding=(1, 2),
         )
     )
+
+def print_question(question: str):
+    """Print a question in a styled panel."""
+    render_panel(question, "❓ Question", "cyan", "bold")

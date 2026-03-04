@@ -1,4 +1,5 @@
 import re
+from .extracts import extract_answer
 
 def has_complete_thinking_block(text: str) -> bool:
     """
@@ -69,3 +70,10 @@ def check_no_text_before_think(text: str, tag: str = "think") -> bool:
         
     # Check if a stripped version of the text before the tag is empty
     return text[:tag_index].strip() == ""
+
+def is_correct_answer(text, ground_truth):
+    answer = extract_answer(text)
+    if answer is not None:
+        return answer == ground_truth
+    return False
+
