@@ -8,7 +8,9 @@ from datasets import load_dataset
 from grpo.functions import generate_completions
 
 
-def generate_prompt(
+# ---------- Generators ---------- #
+
+def generate_prompt_deepseek(
     question,
     helper="",
     think_start_tok="<think>",
@@ -16,9 +18,7 @@ def generate_prompt(
     answer_start_tok="<answer>",
     answer_stop_tok="</answer>",
 ):
-    """
-    Wraps a question into the DeepSeek-R1 paper prompt format.
-    """
+    # DeepSeek-R1 paper prompt format.
     prompt = (
         "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. "
         "The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. "
@@ -29,7 +29,56 @@ def generate_prompt(
     return prompt
 
 
-# ---------- parsing helpers ----------
+def generate_prompt_base(
+    question,
+    helper="",
+    think_start_tok="<think>",
+    think_stop_tok="</think>",
+    answer_start_tok="<answer>",
+    answer_stop_tok="</answer>",
+):
+    # A minimal prompt that keeps the same tag structure
+    prompt = (
+        "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. "
+        f"The answer is enclosed within {answer_start_tok}...{answer_stop_tok} tags, "
+        f"i.e., {answer_start_tok} answer here {answer_stop_tok}. "
+        f"User: {question}. Assistant: {helper}"
+    )
+    return prompt
+
+
+def generate_prompt(
+    question,
+    helper="",
+    prompt_style: str = "deepseek",
+    think_start_tok="<think>",
+    think_stop_tok="</think>",
+    answer_start_tok="<answer>",
+    answer_stop_tok="</answer>",
+):
+    # Choose prompt type
+    style = (prompt_style or "deepseek").lower()
+    if style in {"base", "minimal"}:
+        return generate_prompt_base(
+            question,
+            helper=helper,
+            think_start_tok=think_start_tok,
+            think_stop_tok=think_stop_tok,
+            answer_start_tok=answer_start_tok,
+            answer_stop_tok=answer_stop_tok,
+        )
+    return generate_prompt_deepseek(
+        question,
+        helper=helper,
+        think_start_tok=think_start_tok,
+        think_stop_tok=think_stop_tok,
+        answer_start_tok=answer_start_tok,
+        answer_stop_tok=answer_stop_tok,
+    )
+
+
+
+# ---------- Parsing helpers ---------- #
 
 def extract_gsm8k_gold(answer_str: str) -> int | None:
     # GSM8K answers contain: "\n#### 42"
@@ -77,7 +126,22 @@ def majority_vote(values: list[int | None]) -> int | None:
     return Counter(vals).most_common(1)[0][0]
 
 
-# ---------- evaluation ----------
+def count_think_tokens(text: str, tokenizer) -> int:
+    """Count tokenizer tokens inside <think>...</think>. Returns 0 if missing."""
+    m = re.search(r"<think>\s*(.*?)\s*</think>", text, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return 0
+    think_text = m.group(1)
+    # Tokenize without special tokens for a fair token count
+    return len(tokenizer.encode(think_text, add_special_tokens=False))
+
+
+def count_total_tokens(text: str, tokenizer) -> int:
+    """Count total tokenizer tokens in the generated completion string."""
+    return len(tokenizer.encode(text, add_special_tokens=False))
+
+
+# ---------- Evaluation ---------- #
 
 @torch.no_grad()
 def evaluate_gsm8k_maj16(
@@ -86,21 +150,23 @@ def evaluate_gsm8k_maj16(
     split: str = "test",
     n_examples: int | None = None,
     batch_size: int = 8,
-    G: int = 16,
+    maj_k: int = 16,        # Choose which maj@ to use
+    pass_k: int = 1,        # CHoose which pass@ to use
     temperature: float = 0.7,
     max_new_tokens: int = 256,
     helper: str = "<think>",
+    prompt_style: str = "deepseek",
     show_examples: int = 0,
 ):
     """
-    maj@16 evaluation:
-      - sample 16 completions per question
+    maj@maj_k evaluation:
+      - sample max(maj_k, pass_k) completions per question
       - extract integer answer
       - majority vote
       - exact match vs GSM8K gold integer
 
     Returns:
-      maj@16_accuracy, pass@16_accuracy, no_extract_rate
+      maj@maj_k_accuracy, pass@pass_k_accuracy, no_extract_rate
     """
     ds = load_dataset("gsm8k", "main")[split]
 
@@ -115,17 +181,23 @@ def evaluate_gsm8k_maj16(
     correct_pass = 0
     no_extract = 0
     example_printed = 0
+    total_think_tokens = 0
+    total_completions = 0
+    total_completion_tokens = 0
 
     for start in range(0, len(ds), batch_size):
         batch = ds.select(range(start, min(start + batch_size, len(ds))))
-        prompt_texts = [generate_prompt(ex["question"], helper=helper) for ex in batch]
+        prompt_texts = [
+            generate_prompt(ex["question"], helper=helper, prompt_style=prompt_style)
+            for ex in batch
+        ]
 
-        # Generate 16 sampled completions per prompt
+        # Generate max(maj_k, pass_k) sampled completions per prompt
         _, _, all_texts, all_group_idx = generate_completions(
             model=model,
             tokenizer=tokenizer,
             prompt_texts=prompt_texts,
-            G=G,
+            G=max(maj_k, pass_k),
             max_new_tokens=max_new_tokens,
             temperature=temperature,
         )
@@ -138,36 +210,67 @@ def evaluate_gsm8k_maj16(
         # Score
         for i, ex in enumerate(batch):
             gold = extract_gsm8k_gold(ex["answer"])
-            samples = grouped[i]  # 16 strings
 
-            preds = [extract_predicted_int(t) for t in samples]
-            maj_pred = majority_vote(preds)
+            samples_all = grouped[i]
+            samples_maj = samples_all[:maj_k]
+            samples_pass = samples_all[:pass_k]
+
+            completion_counts_maj = [count_total_tokens(s, tokenizer) for s in samples_maj]
+            total_completion_tokens += sum(completion_counts_maj)
+
+            think_counts_maj = [count_think_tokens(s, tokenizer) for s in samples_maj]
+            total_think_tokens += sum(think_counts_maj)
+            total_completions += len(think_counts_maj)
+
+            preds_all = [extract_predicted_int(t) for t in samples_all]
+            preds_maj = preds_all[:maj_k]
+            preds_pass = preds_all[:pass_k]
+
+            maj_pred = majority_vote(preds_maj)
 
             if example_printed < show_examples:
                 print("\n--- Example ---")
                 print("Q:", ex["question"])
-                print("Gold:", gold)
-                print("maj@16 pred:", maj_pred)
-                print("Sample[0] extracted:", preds[0])
-                print("Sample[0] text (truncated):", samples[0][:300].replace("\n", " "))
+                print("Gold (correct answer):", gold)
+                print(f"maj@{maj_k} pred:", maj_pred)
+
+                valid_votes = [p for p in preds_maj if p is not None]
+                print("\nValid votes:", len(valid_votes), "of", len(preds_maj))
+                print("Top votes:", Counter(valid_votes).most_common(5))
+
+                # Thinking token usage (based on <think>...</think>)
+                sample0_think = count_think_tokens(samples_all[0], tokenizer)
+                avg_think_maj = (sum(think_counts_maj) / len(think_counts_maj)) if think_counts_maj else 0.0
+                print("Think tokens:", sample0_think)
+                print(f"Avg think tokens:", round(avg_think_maj, 2))
+
+                sample0_total = count_total_tokens(samples_all[0], tokenizer)
+                avg_total_maj = (sum(completion_counts_maj) / len(completion_counts_maj)) if completion_counts_maj else 0.0
+                print("Completion tokens:", sample0_total)
+                print(f"Avg completion tokens:", round(avg_total_maj, 2))
+
                 example_printed += 1
 
             if maj_pred is None:
                 no_extract += 1
 
             is_correct_maj = (maj_pred is not None and gold is not None and maj_pred == gold)
-            is_correct_pass = any(p is not None and gold is not None and p == gold for p in preds)
+            is_correct_pass = any(p is not None and gold is not None and p == gold for p in preds_pass)
 
             correct_maj += int(is_correct_maj)
             correct_pass += int(is_correct_pass)
             total += 1
 
     return {
-        "maj@16_accuracy": correct_maj / total,
-        "pass@16_accuracy": correct_pass / total,
+        f"maj@{maj_k}_accuracy": correct_maj / total,
+        f"pass@{pass_k}_accuracy": correct_pass / total,
         "no_extract_rate": no_extract / total,
         "total": total,
-        "G": G,
+        "maj_k": maj_k,
+        "pass_k": pass_k,
         "temperature": temperature,
         "max_new_tokens": max_new_tokens,
+        "prompt_style": prompt_style,
+        "avg_think_tokens_per_maj_sample": (total_think_tokens / total_completions) if total_completions else 0.0,
+        "avg_completion_tokens_per_maj_sample": (total_completion_tokens / total_completions) if total_completions else 0.0,
     }
