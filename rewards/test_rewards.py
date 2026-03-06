@@ -30,44 +30,57 @@ class TestFormattingChecks(unittest.TestCase):
         # Forbidden text before tag
         self.assertFalse(checks.check_no_text_before_think("Sure, here is the answer: <think>Thinking...</think>"))
 
-
 class TestCalculateReward(unittest.TestCase):
 
     def setUp(self):
-        # Default weights from our function to calculate expected scores
-        self.format_weight = 0.3
-        self.correctness_weight = 0.7
+        # Updated to match the defaults of your new function
+        self.format_weight = 0.25
+        self.correctness_weight = 0.75
         self.ground_truth = "136"
 
     def test_perfect_output(self):
         text = "<think>Calculating...</think><answer>136</answer>"
-        expected_reward = self.format_weight + self.correctness_weight # 1.0
+        # Format: 0.08 (think) + 0.08 (answer) + 0.04 (no preamble) = 0.20
+        # Correctness: +0.75
+        expected_reward = 0.20 + 0.75 # 0.95
         
         score = rewards.calculate_reward(text, self.ground_truth)
         self.assertAlmostEqual(score, expected_reward)
 
     def test_format_perfect_wrong_answer(self):
         text = "<think>Calculating...</think><answer>999</answer>"
-        # Should get full format points, plus the 0.1 penalty multiplier for a wrong answer
-        expected_reward = self.format_weight + (self.correctness_weight * 0.1)
+        # Format: 0.20
+        # Correctness penalty: - (0.75 * 0.05) = -0.0375
+        expected_reward = 0.20 - (self.correctness_weight * 0.05) # 0.1625
         
         score = rewards.calculate_reward(text, self.ground_truth)
         self.assertAlmostEqual(score, expected_reward)
 
     def test_preamble_penalty(self):
         text = "Let's solve this. <think>Calculating...</think><answer>136</answer>"
-        # Fails the no_preamble check, so it misses the full format reward.
-        # It should still trigger the partial answer reward (0.5 * format_weight)
-        # Plus full correctness points.
-        expected_reward = (self.format_weight * 0.5) + self.correctness_weight
+        # Format: 0.08 (think) + 0.08 (answer) + 0 (preamble failed) = 0.16
+        # Correctness: +0.75
+        expected_reward = 0.16 + 0.75 # 0.91
         
         score = rewards.calculate_reward(text, self.ground_truth)
         self.assertAlmostEqual(score, expected_reward)
 
     def test_multiple_thinking_blocks_penalty(self):
         text = "<think>Step 1</think><think>Step 2</think><answer>136</answer>"
-        # Fails single thinking block. Only gets partial answer format points + correctness.
-        expected_reward = (self.format_weight * 0.5) + self.correctness_weight
+        # Format: 0 (think failed) + 0.08 (answer) + 0.04 (no preamble) = 0.12
+        # Correctness: +0.75
+        expected_reward = 0.12 + 0.75 # 0.87
+        
+        score = rewards.calculate_reward(text, self.ground_truth)
+        self.assertAlmostEqual(score, expected_reward)
+
+    def test_answer_leakage_penalty(self):
+        # The model puts the answer "136" directly inside the think block
+        text = "<think>The answer is 136.</think><answer>136</answer>"
+        # Format: 0.20
+        # Correctness: 0.75
+        # Leakage penalty: -0.10
+        expected_reward = 0.20 + 0.75 - 0.10 # 0.85
         
         score = rewards.calculate_reward(text, self.ground_truth)
         self.assertAlmostEqual(score, expected_reward)
