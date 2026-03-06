@@ -135,7 +135,7 @@ class GRPOTrainer:
         metrics = {
             "eval_reward": total_reward / total,
             "eval_accuracy": correct / total,
-            "eval_avg_num_tokens": total_response_tokens / total,
+            "eval_avg_response_length": total_response_tokens / total,
             "eval_samples": total,
         }
 
