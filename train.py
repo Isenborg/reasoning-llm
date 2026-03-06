@@ -8,7 +8,7 @@ model_name = "Qwen/Qwen3-1.7B-Base-sft"
 model = models.load_model(model_name)
 tokenizer = models.load_tokenizer(model_name)
 
-config = GRPOConfig(G=8, max_steps=200, batch_size=2, use_kl=False, eval_samples=50, eval_every=50, K=1, lr=2e-6, max_new_tokens=512)
+config = GRPOConfig(G=6, max_steps=200, batch_size=2, use_kl=False, eval_samples=50, eval_every=50, K=1, lr=2e-6, max_new_tokens=512)
 utils.estimate_vram(model, config)
 
 

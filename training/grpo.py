@@ -5,6 +5,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from utils.checks import is_correct_answer
+from utils import lmprint, extracts
 
 from grpo.functions import (
     get_per_token_logps,
@@ -90,6 +91,10 @@ class GRPOTrainer:
         total_reward = 0.0
         correct = 0
         total = 0
+        total_response_tokens = 0.0
+
+        print_correct = True
+        print_incorrect = True
 
         for idx in indices:
             example = eval_dataset[idx]
@@ -106,14 +111,31 @@ class GRPOTrainer:
             )
 
             response_text = rollouts[0]["response_texts"][0]
+
+            # Sum the response mask to get the number of generated tokens
+            response_num_tokens = rollouts[0]["response_mask"][0].sum().item()
+            total_response_tokens += response_num_tokens 
+
+            # Print out the response and question once per eval for a wrong and correct answer:
+            if is_correct_answer(response_text, answer) and print_correct:
+                print("Correct example:")
+                self._print_example(question, response_text)
+                print_correct = False
+            elif not is_correct_answer(response_text, answer) and print_incorrect:
+                print("Incorrect example:")
+                self._print_example(question, response_text)
+                print_incorrect = False
+
             correct += is_correct_answer(response_text, answer)
             reward = self.reward_fn(response_text, answer)
             total_reward += reward
             total += 1.0 # Max reward per response
+ 
 
         metrics = {
             "eval_reward": total_reward / total,
             "eval_accuracy": correct / total,
+            "eval_avg_num_tokens": total_response_tokens / total,
             "eval_samples": total,
         }
 
@@ -239,6 +261,10 @@ class GRPOTrainer:
         self.model.eval()
         print(f"Training complete. {global_step} steps, ~{epoch + 1} epochs.")
 
+    def _print_example(self, question, response):
+        lmprint.print_question(question)
+        lmprint.pretty_print(response)
+
     def _log_step(self, step, loss, mean_reward):
         print(f"  Step {step:>4d} | Loss: {loss:.4f} | Mean Reward: {mean_reward:.3f}")
 
@@ -250,4 +276,5 @@ class GRPOTrainer:
         print(f"\n  [EVAL @ step {step}] "
               f"Reward: {metrics['eval_reward']:.3f} | "
               f"Accuracy: {metrics['eval_accuracy']:.1%} | "
+              f"Avg Len: {metrics['eval_avg_response_length']:.1f} tokens | "
               f"Samples: {metrics['eval_samples']}\n")
