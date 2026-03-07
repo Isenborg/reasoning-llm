@@ -12,6 +12,7 @@ class GRPOConfig:
     max_new_tokens: int = 256
     temperature: float = 1.0
     gradient_accumulation_steps: int = 8    # Effective batch size
+    grad_clip: float = 2.0
 
     # Kl penalty
     use_kl: bool = True
