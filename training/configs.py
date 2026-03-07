@@ -11,6 +11,7 @@ class GRPOConfig:
     batch_size: int = 4       # Questions per batch
     max_new_tokens: int = 256
     temperature: float = 1.0
+    gradient_accumulation_steps: int = 8    # Effective batch size
 
     # Kl penalty
     use_kl: bool = True
