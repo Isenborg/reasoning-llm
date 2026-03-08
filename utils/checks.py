@@ -1,7 +1,6 @@
 import re
 from .extracts import extract_answer
-from rewards.rewards import normalize_gsm8k
-
+from . import normalize
 def has_complete_thinking_block(text: str) -> bool:
     """
     Returns True only if there is a <think> tag followed by a </think> tag.
@@ -78,6 +77,6 @@ def is_correct_answer(text: str, ground_truth: str) -> bool:
     if not answer:
         return False
         
-    gt = normalize_gsm8k(ground_truth)
-    return normalize_gsm8k(answer) == gt
+    gt = normalize.gsm8k(ground_truth)
+    return normalize.gsm8k(answer) == gt
 

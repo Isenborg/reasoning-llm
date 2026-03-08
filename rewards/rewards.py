@@ -1,19 +1,5 @@
-from utils import extracts
-from utils import checks
+from utils import extracts, checks, normalize
 import re
-
-def normalize_gsm8k(x: str) -> str:
-    x = x.lower().strip()
-    x = x.replace(",", "")
-    numbers = re.findall(r"-?\d+\.?\d*", x)
-
-    if not numbers:
-        return x
-
-    # Take the last number found (usually the final answer in a thought chain)
-    last_number = numbers[-1]
-    
-    return str(int(round(float(last_number))))
 
 
 def calculate_reward(
@@ -39,9 +25,9 @@ def calculate_reward(
 
     # Correctness reward
     if ground_truth is not None:
-        gt = normalize_gsm8k(ground_truth)
+        gt = normalize.gsm8k(ground_truth)
         answer = extracts.extract_answer(text)
-        if answer and normalize_gsm8k(answer) == gt:
+        if answer and normalize.gsm8k(answer) == gt:
             reward += correctness_weight
 
     return reward
