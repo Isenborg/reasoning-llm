@@ -60,87 +60,94 @@ def generate_rollouts(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, qu
 
 
 def estimate_vram(model: PreTrainedModel, config: GRPOConfig):
-    """
-    Estimate VRAM usage for GRPO training.
-    Call after model initialization, before training.
-    """
-    def param_bytes(m):
-        total = 0
-        for p in m.parameters():
-            total += p.numel() * p.element_size()
-        return total
+    """Estimate peak VRAM usage for GRPO training."""
 
     def fmt(b):
         return f"{b / 1024**3:.2f} GB"
 
-    model_bytes = param_bytes(model)
-    hidden_size = model.config.hidden_size
-    num_layers = model.config.num_hidden_layers
-    vocab_size = model.config.vocab_size
+    # Model properties
+    n_params = sum(p.numel() for p in model.parameters())
+    dtype_size = next(model.parameters()).element_size()
+    model_bytes = n_params * dtype_size
 
-    est_prompt_len = 128
-    est_seq_len = est_prompt_len + config.max_new_tokens
-    total_sequences = config.batch_size * config.G
+    mc = model.config
+    hidden = mc.hidden_size
+    n_layers = mc.num_hidden_layers
+    vocab = mc.vocab_size
+    n_kv_heads = getattr(mc, "num_key_value_heads", mc.num_attention_heads)
+    head_dim = hidden // mc.num_attention_heads
+    intermediate = getattr(mc, "intermediate_size", hidden * 4)
 
-    # ── Model ──
-    model_mem = model_bytes                                     # π_θ
-    ref_model_mem = model_bytes if config.use_kl else 0         # π_ref
-    grad_mem = model_bytes                                      # gradients
-    optimizer_mem = 2 * model_bytes                             # AdamW (m + v)
+    seq_len = 128 + config.max_new_tokens
+    G = config.G
+    B = config.batch_size
+    total_seq = B * G
 
-    # ── Cached log-probs (replaces old model copy) ──
-    # Shape: [G, seq_len] per question, float32
-    cached_logps_mem = config.batch_size * config.G * est_seq_len * 4  # float32
+    # ── Persistent (always in memory) ──
+    weights = model_bytes
+    ref = model_bytes if config.use_kl else 0
+    grads = model_bytes
+    optim = (n_params * 2) if config.use_8bit_optim else (model_bytes * 2)
+    persistent = weights + ref + grads + optim
 
-    # ── Rollout storage ──
-    # input_ids (int64) + attention_mask (float32) + response_mask (float32)
-    rollout_mem = total_sequences * est_seq_len * (8 + 4 + 4)  # bytes per element
+    # ── Phase peaks (only one active at a time) ──
 
-    # ── Logits during forward pass ──
-    # Shape: [batch_size * G, seq_len, vocab_size]
-    logits_mem = total_sequences * est_seq_len * vocab_size * 2  # bfloat16
+    # Generation: KV cache for all sequences
+    kv_cache = 2 * n_layers * total_seq * n_kv_heads * seq_len * head_dim * dtype_size
 
-    # ── Activations for backward ──
-    activation_mem = total_sequences * est_seq_len * hidden_size * 2 * num_layers * 2
+    # Cache log-probs: logits for G sequences at once
+    cache_peak = G * seq_len * vocab * dtype_size
 
-    total = (
-        model_mem + ref_model_mem +
-        grad_mem + optimizer_mem +
-        cached_logps_mem + rollout_mem +
-        logits_mem + activation_mem
-    )
+    # Training: 1 sequence at a time, grad checkpointing on
+    train_logits = seq_len * vocab * dtype_size
+    train_activations = (n_layers * seq_len * hidden * dtype_size  # checkpoint storage
+                         + seq_len * intermediate * dtype_size)     # recompute buffer
+    train_peak = train_logits + train_activations
 
-    num_models = 2 if config.use_kl else 1
+    # Rollout tensors + cached logps (held during phases 2 and 3)
+    rollout_storage = total_seq * seq_len * (8 + 8 + 4)  # ids, mask, response_mask
+    cached_logps = total_seq * seq_len * 4                # float32
 
-    print("=" * 55)
-    print("VRAM Estimate")
-    print("=" * 55)
-    print(f"  Model (π_θ):             {fmt(model_mem)}")
+    # Peak = persistent + worst phase
+    phase_peaks = {
+        "Generation": kv_cache,
+        "Cache log-probs": cache_peak + rollout_storage + cached_logps,
+        "Training": train_peak + rollout_storage + cached_logps,
+    }
+    peak_phase = max(phase_peaks, key=phase_peaks.get)
+    cuda_overhead = int(0.4 * 1024**3)
+    peak_total = persistent + phase_peaks[peak_phase] + cuda_overhead
+
+    # ── Print ──
+    print("=" * 50)
+    print("  VRAM ESTIMATE")
+    print("=" * 50)
+    print(f"  Model:       {n_params/1e9:.2f}B params, {dtype_size}B/param")
+    print(f"  Sequences:   {B} × {G} = {total_seq}, ~{seq_len} tokens")
+    print()
+    print(f"  Weights:     {fmt(weights)}")
     if config.use_kl:
-        print(f"  Ref model (π_ref):       {fmt(ref_model_mem)}")
-    print(f"  Gradients:               {fmt(grad_mem)}")
-    print(f"  Optimizer (AdamW):        {fmt(optimizer_mem)}")
-    print(f"  Cached log-probs:        {fmt(cached_logps_mem)}")
-    print(f"  Rollout tensors:         {fmt(rollout_mem)}")
-    print(f"    ({config.batch_size} questions × {config.G} rollouts × ~{est_seq_len} tokens)")
-    print(f"  Logits:                  {fmt(logits_mem)}")
-    print(f"  Activations (~est):      {fmt(activation_mem)}")
-    print("-" * 55)
-    print(f"  Total estimate:          {fmt(total)}")
-    print("=" * 55)
+        print(f"  Ref model:   {fmt(ref)}")
+    print(f"  Gradients:   {fmt(grads)}")
+    label = "8-bit" if config.use_8bit_optim else "standard"
+    print(f"  Optimizer:   {fmt(optim)} ({label})")
+    print(f"  Persistent:  {fmt(persistent)}")
+    print()
+    for name, mem in phase_peaks.items():
+        marker = " ← peak" if name == peak_phase else ""
+        print(f"  {name:20s} +{fmt(mem)}{marker}")
+    print()
+    print(f"  Peak VRAM:   {fmt(peak_total)}")
+    print("=" * 50)
 
     if torch.cuda.is_available():
         total_gpu = torch.cuda.get_device_properties(0).total_memory
-        allocated = torch.cuda.memory_allocated()
-        reserved = torch.cuda.memory_reserved()
-        print(f"\n  GPU total:               {fmt(total_gpu)}")
-        print(f"  Currently allocated:     {fmt(allocated)}")
-        print(f"  Currently reserved:      {fmt(reserved)}")
-        print(f"  Free (approx):           {fmt(total_gpu - reserved)}")
-
-        if total > total_gpu:
-            print(f"\n  ⚠️  Estimated usage exceeds GPU memory by {fmt(total - total_gpu)}")
+        headroom = total_gpu - peak_total
+        print(f"  GPU memory:  {fmt(total_gpu)}")
+        if headroom > 0:
+            print(f"  ✅ Fits with ~{fmt(headroom)} headroom")
         else:
-            print(f"\n  ✅ Should fit with ~{fmt(total_gpu - total)} headroom")
+            print(f"  ⚠️  Over by {fmt(-headroom)}")
+        print()
 
-    return total
+    return peak_total
