@@ -4,6 +4,7 @@ import random
 import wandb
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
+import time
 
 from grpo.functions import (
     get_per_token_logps,
@@ -15,32 +16,45 @@ from training.configs import GRPOConfig
 from utils.models import save_model
 from utils.checks import is_correct_answer
 from utils import lmprint
+import bitsandbytes as bnb
+
+# Lower matmul precision
+torch.set_float32_matmul_precision("high")
 
 
 class GRPOTrainer:
     def __init__(
         self,
         model: PreTrainedModel,
-        ref_model: PreTrainedModel | None,
         tokenizer: PreTrainedTokenizer,
         reward_fn,
         config: GRPOConfig,
     ):
         self.model = model
         self.model.gradient_checkpointing_enable()
-        self.ref_model = ref_model
         self.tokenizer = tokenizer
         self.reward_fn = reward_fn
         self.config = config
 
-        if self.ref_model is not None:
-            self.ref_model.eval()
-            for param in self.ref_model.parameters():
-                param.requires_grad = False
+        if self.config.use_8bit_optim:
+            self.optimizer = bnb.optim.AdamW8bit(
+                self.model.parameters(), lr=self.config.lr
+            )
+        else:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(), lr=self.config.lr
+            )
 
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config.lr)
+        self.timings = {
+            "generation": 0.0,
+            "training": 0.0,
+            "total_gen_tokens": 0,
+            "total_train_tokens": 0,
+        }
 
-    def _compute_rewards(self, response_texts: list[str], ground_truth: str) -> torch.Tensor:
+    def _compute_rewards(
+        self, response_texts: list[str], ground_truth: str
+    ) -> torch.Tensor:
         rewards = [self.reward_fn(resp, ground_truth) for resp in response_texts]
         return torch.tensor(rewards, dtype=torch.float, device=self.model.device)
 
@@ -58,18 +72,18 @@ class GRPOTrainer:
         total_loss = 0.0
 
         for i in range(G):
-            ids = rollout["input_ids"][i:i+1]
-            mask = rollout["attention_mask"][i:i+1]
-            r_mask = rollout["response_mask"][i:i+1]
-            old_lp = old_logps[i:i+1]
-            adv = advantages[i:i+1]
+            ids = rollout["input_ids"][i : i + 1]
+            mask = rollout["attention_mask"][i : i + 1]
+            r_mask = rollout["response_mask"][i : i + 1]
+            old_lp = old_logps[i : i + 1]
+            adv = advantages[i : i + 1]
 
             new_lp = get_per_token_logps(self.model, ids, mask)
-            log_ratio = (new_lp - old_lp) * r_mask
+            log_ratio = new_lp - old_lp
             ratios = torch.exp(log_ratio)
 
             loss = grpo_loss(ratios, adv, r_mask, epsilon=self.config.epsilon)
-            scaled = loss / (G * n_rollouts * self.config.gradient_accumulation_steps)
+            scaled = loss / (G * n_rollouts)
             scaled.backward()
 
             total_loss += loss.item()
@@ -77,7 +91,7 @@ class GRPOTrainer:
         return total_loss / G
 
     def _compute_batch_metrics(self, rollouts, all_rewards):
-        """Extract useful metrics from training rollouts — no extra compute."""
+        """Extract useful metrics from training rollouts."""
         all_r = torch.cat(all_rewards)
 
         lengths = []
@@ -89,7 +103,7 @@ class GRPOTrainer:
         return {
             "train/mean_reward": all_r.mean().item(),
             "train/reward_std": all_r.std().item(),
-            "train/fraction_correct": (all_r > 0).float().mean().item(),
+            "train/fraction_correct": (all_r > 0.5).float().mean().item(),
             "train/mean_response_length": all_lengths.mean().item(),
             "train/max_response_length": all_lengths.max().item(),
             "train/min_response_length": all_lengths.min().item(),
@@ -143,7 +157,9 @@ class GRPOTrainer:
                     self._print_example(qs[j], resp)
                     printed_correct = True
                 elif not is_corr and not printed_incorrect:
-                    print(f"\n[Eval] Incorrect Example Found (GT={ground_truth}):")
+                    print(
+                        f"\n[Eval] Incorrect Example Found (GT={ground_truth}):"
+                    )
                     self._print_example(qs[j], resp)
                     printed_incorrect = True
 
@@ -157,21 +173,17 @@ class GRPOTrainer:
         }
 
     def train(self, dataset, eval_dataset=None, run_name="grpo_model"):
-        # Initialize wandb
         wandb.init(
             project="grpo-qwen3-gsm8k",
             name=run_name,
+            mode="online" if self.config.use_wandb else "disabled",
             config={
                 "model": "Qwen3-1.7B",
                 "dataset": "gsm8k",
                 "G": self.config.G,
                 "batch_size": self.config.batch_size,
-                "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
-                "effective_batch_size": (
-                    self.config.batch_size * self.config.gradient_accumulation_steps
-                ),
-                "lr": self.config.lr,
                 "K": self.config.K,
+                "lr": self.config.lr,
                 "epsilon": self.config.epsilon,
                 "temperature": self.config.temperature,
                 "max_new_tokens": self.config.max_new_tokens,
@@ -186,20 +198,28 @@ class GRPOTrainer:
             shuffle=True,
         )
 
-        steps_per_epoch = len(dataloader)
+        # Each batch produces K optimizer steps
+        batches_per_epoch = len(dataloader)
+        steps_per_epoch = batches_per_epoch * self.config.K
         max_epochs = math.ceil(self.config.max_steps / steps_per_epoch)
-        best_accuracy = 0.0
 
-        effective_batch = self.config.batch_size * self.config.gradient_accumulation_steps
-        print(f"Training: {self.config.max_steps} steps | "
-              f"{steps_per_epoch} steps/epoch | "
-              f"~{max_epochs} epochs over {len(dataset)} questions")
-        print(f"Batch size: {self.config.batch_size} x "
-              f"{self.config.gradient_accumulation_steps} accum = "
-              f"{effective_batch} effective")
+        print(
+            f"Training: {self.config.max_steps} optimizer steps | "
+            f"{batches_per_epoch} batches/epoch | "
+            f"K={self.config.K} updates/batch | "
+            f"{steps_per_epoch} steps/epoch | "
+            f"~{max_epochs} epochs over {len(dataset)} questions"
+        )
+        print(
+            f"Batch size: {self.config.batch_size} | "
+            f"G: {self.config.G} | "
+            f"Completions per batch: {self.config.batch_size * self.config.G}"
+        )
         if eval_dataset:
-            print(f"Evaluating every {self.config.eval_every} steps "
-                  f"on {self.config.eval_samples} samples")
+            print(
+                f"Evaluating every {self.config.eval_every} optimizer steps "
+                f"on {self.config.eval_samples} samples"
+            )
         print("-" * 50)
 
         # Initial evaluation
@@ -207,15 +227,16 @@ class GRPOTrainer:
             metrics = self.evaluate(eval_dataset)
             best_accuracy = metrics["eval/accuracy"]
             self._log_eval(0, metrics)
+        else:
+            best_accuracy = 0.0
 
         self.model.train()
         global_step = 0
-        accum_step = 0
-        self.optimizer.zero_grad()
+        examples_seen = 0
 
         for epoch in range(max_epochs):
             epoch_loss = 0.0
-            num_steps = 0
+            epoch_batches = 0
 
             for batch in dataloader:
                 if global_step >= self.config.max_steps:
@@ -223,9 +244,13 @@ class GRPOTrainer:
 
                 batch_q = batch["question"]
                 batch_a = batch["answer"]
+                examples_seen += len(batch_q)
 
-                # 1. Generate rollouts with current model
+                # 1. Generate rollouts
                 self.model.eval()
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+
                 rollouts = generate_rollouts(
                     model=self.model,
                     tokenizer=self.tokenizer,
@@ -234,84 +259,149 @@ class GRPOTrainer:
                     max_new_tokens=self.config.max_new_tokens,
                     temperature=self.config.temperature,
                 )
+
+                torch.cuda.synchronize()
+                gen_time = time.perf_counter() - t0
                 self.model.train()
 
-                # 2. Cache log-probs (π_θ_old)
+                gen_tokens = sum(
+                    r["response_mask"].sum().item() for r in rollouts
+                )
+                self.timings["generation"] += gen_time
+                self.timings["total_gen_tokens"] += gen_tokens
+
+                # 2. Cache old log-probs
                 cached_logps = [self._cache_logps(r) for r in rollouts]
 
-                # 3. Score and compute advantages
+                # 3. Rewards and advantages
                 all_rewards = []
                 all_advantages = []
                 for rollout, answer in zip(rollouts, batch_a):
-                    rewards = self._compute_rewards(rollout["response_texts"], answer)
+                    rewards = self._compute_rewards(
+                        rollout["response_texts"], answer
+                    )
                     advantages = compute_advantages(rewards)
                     all_rewards.append(rewards)
                     all_advantages.append(advantages)
 
-                # 4. Compute training metrics (free — already have all tensors)
-                train_metrics = self._compute_batch_metrics(rollouts, all_rewards)
-
-                # 5. Compute gradients
-                batch_loss = 0.0
-                for rollout, old_logps, adv in zip(rollouts, cached_logps, all_advantages):
-                    loss_val = self._train_step(rollout, old_logps, adv, n_rollouts=len(rollouts))
-                    batch_loss += loss_val
-
-                accum_step += 1
-
-                # 6. Step optimizer only after accumulating enough gradients
-                if accum_step % self.config.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), max_norm=self.config.grad_clip
-                    )
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-
-                epoch_loss += batch_loss
-                num_steps += 1
-                global_step += 1
-
-                # 7. Log to wandb every step (cheap metrics only)
-                wandb.log(
-                    {
-                        **train_metrics,
-                        "train/loss": batch_loss,
-                    },
-                    step=global_step,
+                # 4. Training metrics
+                train_metrics = self._compute_batch_metrics(
+                    rollouts, all_rewards
                 )
 
-                # 8. Console logging (every 10 steps to avoid spam)
-                if global_step % 10 == 0:
-                    print(
-                        f"  Step {global_step:>4d} | "
-                        f"Reward: {train_metrics['train/mean_reward']:.3f} | "
-                        f"Correct: {train_metrics['train/fraction_correct']:.1%} | "
-                        f"Avg Len: {train_metrics['train/mean_response_length']:.0f}"
+                # 5. K policy update steps
+                train_time = 0.0
+                for k in range(self.config.K):
+                    if global_step >= self.config.max_steps:
+                        break
+
+                    torch.cuda.synchronize()
+                    k_t0 = time.perf_counter()
+
+                    self.optimizer.zero_grad()
+                    batch_loss = 0.0
+                    for rollout, old_logps, adv in zip(
+                        rollouts, cached_logps, all_advantages
+                    ):
+                        loss_val = self._train_step(
+                            rollout, old_logps, adv, n_rollouts=len(rollouts)
+                        )
+                        batch_loss += loss_val
+
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        max_norm=self.config.grad_clip,
+                    )
+                    self.optimizer.step()
+
+                    torch.cuda.synchronize()
+                    train_time += time.perf_counter() - k_t0
+
+                    global_step += 1
+
+                    wandb.log(
+                        {
+                            **train_metrics,
+                            "train/loss": batch_loss,
+                            "train/examples_seen": examples_seen,
+                            "train/k_epoch": k,
+                        },
+                        step=global_step,
                     )
 
-                # 9. Periodic evaluation
-                if eval_dataset and global_step % self.config.eval_every == 0:
-                    metrics = self.evaluate(eval_dataset)
-                    self._log_eval(global_step, metrics)
+                    # Eval after optimizer step
+                    if (
+                        eval_dataset
+                        and global_step % self.config.eval_every == 0
+                    ):
+                        metrics = self.evaluate(eval_dataset)
+                        self._log_eval(global_step, metrics)
 
-                    if metrics["eval/accuracy"] > best_accuracy:
-                        best_accuracy = metrics["eval/accuracy"]
-                        save_model(self.model, self.tokenizer, f"{run_name}-best")
-                        print(f"  New best model saved at step {global_step}")
+                        if metrics["eval/accuracy"] > best_accuracy:
+                            best_accuracy = metrics["eval/accuracy"]
+                            save_model(
+                                self.model,
+                                self.tokenizer,
+                                f"{run_name}-best",
+                            )
+                            print(
+                                f"  New best model saved at step {global_step}"
+                            )
+
+                # Update timing stats
+                train_tokens = gen_tokens * self.config.K
+                self.timings["training"] += train_time
+                self.timings["total_train_tokens"] += train_tokens
+
+                epoch_loss += batch_loss
+                epoch_batches += 1
+
+                # Console + perf logging every 10 batches
+                if epoch_batches % 10 == 0:
+                    total_time = (
+                        self.timings["generation"] + self.timings["training"]
+                    )
+                    gen_pct = (
+                        100
+                        * self.timings["generation"]
+                        / max(total_time, 1e-9)
+                    )
+                    gen_tps = self.timings["total_gen_tokens"] / max(
+                        self.timings["generation"], 1e-9
+                    )
+                    train_tps = self.timings["total_train_tokens"] / max(
+                        self.timings["training"], 1e-9
+                    )
+                    examples_per_hour = examples_seen / max(
+                        total_time / 3600, 1e-9
+                    )
+
+                    print(
+                        f"  Step {global_step:>4d} | "
+                        f"Examples: {examples_seen:>6d} | "
+                        f"Reward: {train_metrics['train/mean_reward']:.3f} | "
+                        f"Correct: {train_metrics['train/fraction_correct']:.1%} | "
+                        f"Gen: {gen_tps:.0f} tok/s ({gen_pct:.0f}%) | "
+                        f"Train: {train_tps:.0f} tok/s | "
+                        f"{examples_per_hour:.0f} ex/hr"
+                    )
+
+                    wandb.log(
+                        {
+                            "perf/gen_tokens_per_sec": gen_tps,
+                            "perf/train_tokens_per_sec": train_tps,
+                            "perf/gen_time_pct": gen_pct,
+                            "perf/examples_per_hour": examples_per_hour,
+                            "perf/wall_time": total_time,
+                        },
+                        step=global_step,
+                    )
 
             if global_step >= self.config.max_steps:
                 break
 
-            avg_epoch_loss = epoch_loss / max(num_steps, 1)
+            avg_epoch_loss = epoch_loss / max(epoch_batches, 1)
             self._log_epoch(epoch, avg_epoch_loss)
-
-        # Flush any remaining accumulated gradients
-        if accum_step % self.config.gradient_accumulation_steps != 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), max_norm=self.config.grad_clip
-            )
-            self.optimizer.step()
-            self.optimizer.zero_grad()
 
         # Final evaluation
         if eval_dataset:
@@ -319,9 +409,11 @@ class GRPOTrainer:
             self._log_eval(global_step, metrics)
 
         wandb.finish()
-
         self.model.eval()
-        print(f"Training complete. {global_step} steps, ~{epoch + 1} epochs.")
+        print(
+            f"Training complete. {global_step} optimizer steps, "
+            f"{examples_seen} examples seen, ~{epoch + 1} epochs."
+        )
 
     def _print_example(self, question, response):
         lmprint.print_question(question)
@@ -332,10 +424,11 @@ class GRPOTrainer:
         print("-" * 50)
 
     def _log_eval(self, step, metrics):
-        print(f"\n  [EVAL @ step {step}] "
-              f"Reward: {metrics['eval/reward']:.3f} | "
-              f"Accuracy: {metrics['eval/accuracy']:.1%} | "
-              f"Avg Len: {metrics['eval/avg_response_length']:.1f} tokens | "
-              f"Samples: {metrics['eval/samples']}\n")
-
+        print(
+            f"\n  [EVAL @ step {step}] "
+            f"Reward: {metrics['eval/reward']:.3f} | "
+            f"Accuracy: {metrics['eval/accuracy']:.1%} | "
+            f"Avg Len: {metrics['eval/avg_response_length']:.1f} tokens | "
+            f"Samples: {metrics['eval/samples']}\n"
+        )
         wandb.log(metrics, step=step)

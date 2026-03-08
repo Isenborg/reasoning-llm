@@ -7,7 +7,7 @@ class GRPOConfig:
     K: int = 1                # Gradient steps per rollout phase
     epsilon: float = 0.2      # Clip range
     lr: float = 1e-5
-    max_steps: int = 100           # Number of training steps
+    max_steps: int = 1000           # Number of training steps
     batch_size: int = 4       # Questions per batch
     max_new_tokens: int = 256
     temperature: float = 1.0
@@ -24,6 +24,10 @@ class GRPOConfig:
 
     # Checkpoint management
     save_freq: int = -1      # Save every N steps. -1 for no checkpoints
+
+    # Potential 8 bit optimizer setting
+    use_8bit_optim: bool = False
+    use_wandb: bool = False
 
 
 @dataclass
