@@ -172,11 +172,12 @@ class GRPOTrainer:
             "eval/samples": n_total,
         }
 
-    def train(self, dataset, eval_dataset=None, run_name="grpo_model"):
+    def train(self, dataset, eval_dataset=None, run_name="grpo_model", run_id=None):
         wandb.init(
             project="grpo-qwen3-gsm8k",
             name=run_name,
             mode="online" if self.config.use_wandb else "disabled",
+            id=run_id, # Set this to be able to resume
             resume="allow",
             config={
                 "model": "Qwen3-1.7B",
