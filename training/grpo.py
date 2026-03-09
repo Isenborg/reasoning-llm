@@ -333,11 +333,17 @@ class GRPOTrainer:
                         step=global_step,
                     )
 
+                    # ── Periodic checkpoint ──
+                    if (self.config.save_freq > 0 and global_step % self.config.save_freq == 0):
+                        save_model(
+                            self.model,
+                            self.tokenizer,
+                            f"{run_name}-step{global_step}",
+                        )
+                        print(f"  💾 Checkpoint saved at step {global_step}")
+
                     # Eval after optimizer step
-                    if (
-                        eval_dataset
-                        and global_step % self.config.eval_every == 0
-                    ):
+                    if (eval_dataset and global_step % self.config.eval_every == 0):
                         metrics = self.evaluate(eval_dataset)
                         self._log_eval(global_step, metrics)
 

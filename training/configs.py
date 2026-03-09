@@ -22,6 +22,9 @@ class GRPOConfig:
     eval_every: int = 20      # Steps between evals
     eval_samples: int = 50    # Number of samples to use for eval
 
+    # Warmup
+    run_sft_warmup: bool = True
+
     # Checkpoint management
     save_freq: int = -1      # Save every N steps. -1 for no checkpoints
 
@@ -32,7 +35,7 @@ class GRPOConfig:
 
 @dataclass
 class SFTWarmupConfig:
-    epochs: int = 2
+    epochs: int = 5
     batch_size: int = 8
     lr: float = 5e-4
     grad_clip: float = 2.0

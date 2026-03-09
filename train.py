@@ -9,7 +9,7 @@ from rewards import rewards
 
 # ── Model ──
 model_name = "Qwen/Qwen3-1.7B-Base"
-run_name = "grpo-qwen3-gsm8k-run1"
+run_name = "grpo-qwen3-gsm8k-run2"
 
 model = models.load_model(model_name)
 tokenizer = models.load_tokenizer(model_name)
@@ -26,11 +26,12 @@ config = GRPOConfig(
     max_new_tokens=512,
     max_steps=5000,
     use_8bit_optim=True,
-    use_wandb=True,
+    use_wandb=False,
     use_kl=False,
     run_sft_warmup=True,
-    eval_every=50,
+    eval_every=100,
     eval_samples=64,
+    save_freq=500
 )
 
 # ── VRAM check ──
