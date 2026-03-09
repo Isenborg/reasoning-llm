@@ -31,6 +31,15 @@ class GRPOConfig:
 
 
 @dataclass
+class SFTWarmupConfig:
+    epochs: int = 2
+    batch_size: int = 8
+    lr: float = 5e-4
+    grad_clip: float = 2.0
+    log_every: int = 10
+
+
+@dataclass
 class SFTConfig:
     # TODO
     pass

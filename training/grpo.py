@@ -21,7 +21,6 @@ import bitsandbytes as bnb
 # Lower matmul precision
 torch.set_float32_matmul_precision("high")
 
-
 class GRPOTrainer:
     def __init__(
         self,
@@ -59,13 +58,16 @@ class GRPOTrainer:
         return torch.tensor(rewards, dtype=torch.float, device=self.model.device)
 
     @torch.no_grad()
-    def _cache_logps(self, rollout):
-        logps = get_per_token_logps(
-            self.model,
-            rollout["input_ids"],
-            rollout["attention_mask"],
-        )
-        return logps
+    def _cache_logps(self, rollout, chunk_size=4):
+        all_logps = []
+        for i in range(0, rollout["input_ids"].shape[0], chunk_size):
+            logps = get_per_token_logps(
+                self.model,
+                rollout["input_ids"][i:i+chunk_size],
+                rollout["attention_mask"][i:i+chunk_size],
+            )
+            all_logps.append(logps)
+        return torch.cat(all_logps, dim=0)
 
     def _train_step(self, rollout, old_logps, advantages, n_rollouts):
         G = rollout["input_ids"].shape[0]
