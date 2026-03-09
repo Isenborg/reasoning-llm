@@ -35,7 +35,7 @@ class GRPOConfig:
 
 @dataclass
 class SFTWarmupConfig:
-    epochs: int = 5
+    epochs: int = 3
     batch_size: int = 8
     lr: float = 5e-4
     grad_clip: float = 2.0

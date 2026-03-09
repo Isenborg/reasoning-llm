@@ -13,13 +13,14 @@ from grpo.functions import (
 )
 from grpo.utils import generate_rollouts
 from training.configs import GRPOConfig
-from utils.models import save_model
+from utils.models import save_model, save_checkpoint, load_checkpoint
 from utils.checks import is_correct_answer
 from utils import lmprint
 import bitsandbytes as bnb
 
 # Lower matmul precision
 torch.set_float32_matmul_precision("high")
+
 
 class GRPOTrainer:
     def __init__(
@@ -63,8 +64,8 @@ class GRPOTrainer:
         for i in range(0, rollout["input_ids"].shape[0], chunk_size):
             logps = get_per_token_logps(
                 self.model,
-                rollout["input_ids"][i:i+chunk_size],
-                rollout["attention_mask"][i:i+chunk_size],
+                rollout["input_ids"][i : i + chunk_size],
+                rollout["attention_mask"][i : i + chunk_size],
             )
             all_logps.append(logps)
         return torch.cat(all_logps, dim=0)
@@ -174,12 +175,19 @@ class GRPOTrainer:
             "eval/samples": n_total,
         }
 
-    def train(self, dataset, eval_dataset=None, run_name="grpo_model", run_id=None):
+    def train(
+        self,
+        dataset,
+        eval_dataset=None,
+        run_name="grpo_model",
+        run_id=None,
+        resume_from=None,
+    ):
         wandb.init(
             project="grpo-qwen3-gsm8k",
             name=run_name,
             mode="online" if self.config.use_wandb else "disabled",
-            id=run_id, # Set this to be able to resume
+            id=run_id,
             resume="allow",
             config={
                 "model": "Qwen3-1.7B",
@@ -207,6 +215,18 @@ class GRPOTrainer:
         steps_per_epoch = batches_per_epoch * self.config.K
         max_epochs = math.ceil(self.config.max_steps / steps_per_epoch)
 
+        # ── Resume or fresh start ──
+        global_step = 0
+        examples_seen = 0
+        best_accuracy = 0.0
+
+        if resume_from:
+            state = load_checkpoint(resume_from, self.optimizer)
+            if state:
+                global_step = state["global_step"]
+                examples_seen = state["examples_seen"]
+                best_accuracy = state["best_accuracy"]
+
         print(
             f"Training: {self.config.max_steps} optimizer steps | "
             f"{batches_per_epoch} batches/epoch | "
@@ -219,6 +239,12 @@ class GRPOTrainer:
             f"G: {self.config.G} | "
             f"Completions per batch: {self.config.batch_size * self.config.G}"
         )
+        if resume_from:
+            print(
+                f"Resumed from step {global_step} | "
+                f"Examples seen: {examples_seen} | "
+                f"Best accuracy: {best_accuracy:.1%}"
+            )
         if eval_dataset:
             print(
                 f"Evaluating every {self.config.eval_every} optimizer steps "
@@ -226,17 +252,13 @@ class GRPOTrainer:
             )
         print("-" * 50)
 
-        # Initial evaluation
-        if eval_dataset:
+        # Initial evaluation (only on fresh start)
+        if global_step == 0 and eval_dataset:
             metrics = self.evaluate(eval_dataset)
             best_accuracy = metrics["eval/accuracy"]
             self._log_eval(0, metrics)
-        else:
-            best_accuracy = 0.0
 
         self.model.train()
-        global_step = 0
-        examples_seen = 0
 
         for epoch in range(max_epochs):
             epoch_loss = 0.0
@@ -280,13 +302,24 @@ class GRPOTrainer:
                 # 3. Rewards and advantages
                 all_rewards = []
                 all_advantages = []
-                for rollout, answer in zip(rollouts, batch_a):
+                active_rollouts = []
+                active_logps = []
+                active_advantages = []
+
+                for rollout, old_logps, answer in zip(
+                    rollouts, cached_logps, batch_a
+                ):
                     rewards = self._compute_rewards(
                         rollout["response_texts"], answer
                     )
                     advantages = compute_advantages(rewards)
                     all_rewards.append(rewards)
                     all_advantages.append(advantages)
+
+                    if rewards.std() > 1e-6:
+                        active_rollouts.append(rollout)
+                        active_logps.append(old_logps)
+                        active_advantages.append(advantages)
 
                 # 4. Training metrics
                 train_metrics = self._compute_batch_metrics(
@@ -304,19 +337,21 @@ class GRPOTrainer:
 
                     self.optimizer.zero_grad()
                     batch_loss = 0.0
-                    for rollout, old_logps, adv in zip(
-                        rollouts, cached_logps, all_advantages
-                    ):
-                        loss_val = self._train_step(
-                            rollout, old_logps, adv, n_rollouts=len(rollouts)
-                        )
-                        batch_loss += loss_val
+                    if len(active_rollouts) > 0:
+                        for rollout, old_logps, adv in zip(
+                            active_rollouts, active_logps, active_advantages
+                        ):
+                            loss_val = self._train_step(
+                                rollout, old_logps, adv,
+                                n_rollouts=len(active_rollouts),
+                            )
+                            batch_loss += loss_val
 
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=self.config.grad_clip,
-                    )
-                    self.optimizer.step()
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            max_norm=self.config.grad_clip,
+                        )
+                        self.optimizer.step()
 
                     torch.cuda.synchronize()
                     train_time += time.perf_counter() - k_t0
@@ -334,28 +369,42 @@ class GRPOTrainer:
                     )
 
                     # ── Periodic checkpoint ──
-                    if (self.config.save_freq > 0 and global_step % self.config.save_freq == 0):
-                        save_model(
+                    if (
+                        self.config.save_freq > 0
+                        and global_step % self.config.save_freq == 0
+                    ):
+                        save_checkpoint(
                             self.model,
                             self.tokenizer,
+                            self.optimizer,
                             f"{run_name}-step{global_step}",
+                            global_step,
+                            examples_seen,
+                            best_accuracy,
                         )
-                        print(f"  💾 Checkpoint saved at step {global_step}")
 
-                    # Eval after optimizer step
-                    if (eval_dataset and global_step % self.config.eval_every == 0):
+                    # ── Eval after optimizer step ──
+                    if (
+                        eval_dataset
+                        and global_step % self.config.eval_every == 0
+                    ):
                         metrics = self.evaluate(eval_dataset)
                         self._log_eval(global_step, metrics)
 
                         if metrics["eval/accuracy"] > best_accuracy:
                             best_accuracy = metrics["eval/accuracy"]
-                            save_model(
+                            save_checkpoint(
                                 self.model,
                                 self.tokenizer,
+                                self.optimizer,
                                 f"{run_name}-best",
+                                global_step,
+                                examples_seen,
+                                best_accuracy,
                             )
                             print(
-                                f"  New best model saved at step {global_step}"
+                                f"  ⭐ New best at step {global_step} "
+                                f"({best_accuracy:.1%})"
                             )
 
                 # Update timing stats
@@ -413,10 +462,20 @@ class GRPOTrainer:
             avg_epoch_loss = epoch_loss / max(epoch_batches, 1)
             self._log_epoch(epoch, avg_epoch_loss)
 
-        # Final evaluation
+        # ── Final save + eval ──
         if eval_dataset:
             metrics = self.evaluate(eval_dataset)
             self._log_eval(global_step, metrics)
+
+        save_checkpoint(
+            self.model,
+            self.tokenizer,
+            self.optimizer,
+            f"{run_name}-final",
+            global_step,
+            examples_seen,
+            best_accuracy,
+        )
 
         wandb.finish()
         self.model.eval()

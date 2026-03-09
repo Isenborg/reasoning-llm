@@ -1,5 +1,6 @@
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
 
 DEFAULT_MODEL_DIR = Path("/nobackup") / Path.home().name / "models"
 # resolves to: /nobackup/liuid123/models
@@ -93,3 +94,46 @@ def save_model(model, tokenizer, name: str, model_dir: Path = DEFAULT_MODEL_DIR)
     tokenizer.save_pretrained(save_path)
 
     print(f"Saved successfully: {save_path}")
+
+
+def save_checkpoint(
+    model, tokenizer, optimizer, name: str,
+    global_step: int, examples_seen: int, best_accuracy: float,
+    model_dir: Path = DEFAULT_MODEL_DIR,
+):
+    """Save model + training state for resuming."""
+    save_model(model, tokenizer, name, model_dir)
+    save_path = model_dir / name
+
+    state = {
+        "global_step": global_step,
+        "examples_seen": examples_seen,
+        "best_accuracy": best_accuracy,
+        "optimizer_state": optimizer.state_dict(),
+    }
+    torch.save(state, save_path / "training_state.pt")
+    print(f"  Training state saved to {save_path / 'training_state.pt'}")
+
+
+def load_checkpoint(name: str, optimizer=None, model_dir: Path = DEFAULT_MODEL_DIR):
+    """Load training state. Optionally restores optimizer."""
+    state_path = model_dir / name / "training_state.pt"
+
+    if not state_path.exists():
+        return None
+
+    state = torch.load(state_path)
+
+    if optimizer is not None and state.get("optimizer_state") is not None:
+        optimizer.load_state_dict(state["optimizer_state"])
+        print(f"  Optimizer state restored")
+    else:
+        print(f"  ⚠️ No optimizer state found, reinitializing optimizer")
+
+    print(
+        f"  Resumed: step={state['global_step']}, "
+        f"examples={state['examples_seen']}, "
+        f"best_acc={state['best_accuracy']:.1%}"
+    )
+
+    return state
