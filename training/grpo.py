@@ -177,6 +177,7 @@ class GRPOTrainer:
             project="grpo-qwen3-gsm8k",
             name=run_name,
             mode="online" if self.config.use_wandb else "disabled",
+            resume="allow",
             config={
                 "model": "Qwen3-1.7B",
                 "dataset": "gsm8k",
