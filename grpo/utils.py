@@ -36,11 +36,14 @@ def generate_rollouts(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, qu
             pad_token_id=tokenizer.eos_token_id,
         )
 
-        # Build response mask (0 for prompt, 1 for response tokens)
-        response_mask = torch.zeros_like(outputs, dtype=torch.float)
-        response_mask[:, prompt_len:] = 1.0
+        pad_id = tokenizer.pad_token_id
+        attention_mask = (outputs != pad_id).float()
 
-        attention_mask = torch.ones_like(outputs, dtype=torch.float)
+        # Response mask: 1 only for actual response tokens (not prompt, not padding)
+        response_mask = torch.zeros_like(outputs, dtype=torch.float)
+        for i in range(outputs.shape[0]):
+            seq_len = attention_mask[i].sum().long().item()
+            response_mask[i, prompt_len:seq_len] = 1.0
 
         # Decode response portions only
         response_texts = tokenizer.batch_decode(
