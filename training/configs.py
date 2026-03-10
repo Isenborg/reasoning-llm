@@ -26,5 +26,12 @@ class GRPOConfig:
 
 @dataclass
 class SFTConfig:
-    # TODO
-    pass
+    lr: float = 5e-5
+    epochs: int = 3
+    batch_size: int = 8
+    max_length: int = 512       # Max tokens per example (longer examples are dropped)
+    grad_clip: float = 1.0
+
+    # Eval
+    eval_every: int = 200       # Steps between evals
+    eval_samples: int = 100     # Number of eval examples to use
