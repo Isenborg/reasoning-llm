@@ -58,6 +58,9 @@ class SFTTrainer:
         self.config = config
         self.optimizer = AdamW(self.model.parameters(), lr=config.lr)
 
+        if config.gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
+
         # Loss history for plotting
         self.train_steps: list[int] = []
         self.train_losses: list[float] = []
@@ -74,15 +77,16 @@ class SFTTrainer:
             collate_fn=lambda batch: _collate_fn(batch, pad_id),
         )
 
-        steps_per_epoch = len(dataloader)
-        total_steps = steps_per_epoch * self.config.epochs
+        G = self.config.grad_accum_steps
+        optimizer_steps_per_epoch = len(dataloader) // G
+        total_optimizer_steps = optimizer_steps_per_epoch * self.config.epochs
 
         print(f"SFT Training: {self.config.epochs} epochs | "
-              f"{steps_per_epoch} steps/epoch | "
-              f"{total_steps} total steps | "
+              f"batch={self.config.batch_size} × accum={G} = effective batch {self.config.batch_size * G} | "
+              f"~{total_optimizer_steps} optimizer steps | "
               f"{len(train_dataset)} examples")
         if eval_dataset:
-            print(f"Evaluating every {self.config.eval_every} steps "
+            print(f"Evaluating every {self.config.eval_every} optimizer steps "
                   f"on {self.config.eval_samples} samples")
         print("-" * 50)
 
@@ -91,45 +95,54 @@ class SFTTrainer:
             self._log_eval(0, metrics)
 
         self.model.train()
-        global_step = 0
+        self.optimizer.zero_grad()
+        global_step = 0       # counts optimizer steps
+        micro_step = 0        # counts forward passes
         best_accuracy = 0.0
 
         for epoch in range(self.config.epochs):
             epoch_loss = 0.0
+            epoch_optimizer_steps = 0
 
             for batch in dataloader:
                 batch = {k: v.to(self.model.device) for k, v in batch.items()}
 
                 outputs = self.model(**batch)
-                loss = outputs.loss
-
+                # Scale loss so gradients are averaged across accumulation steps
+                loss = outputs.loss / G
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), max_norm=self.config.grad_clip
-                )
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+                micro_step += 1
 
-                epoch_loss += loss.item()
-                global_step += 1
+                # Record the unscaled loss for logging
+                raw_loss = outputs.loss.item()
+                epoch_loss += raw_loss
 
-                self.train_steps.append(global_step)
-                self.train_losses.append(loss.item())
-                self._log_step(global_step, loss.item())
+                if micro_step % G == 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_norm=self.config.grad_clip
+                    )
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                    global_step += 1
+                    epoch_optimizer_steps += 1
 
-                if eval_dataset and global_step % self.config.eval_every == 0:
-                    metrics = self.evaluate(eval_dataset)
-                    self._log_eval(global_step, metrics)
-                    self.eval_steps.append(global_step)
-                    self.eval_losses.append(metrics["eval_loss"])
+                    self.train_steps.append(global_step)
+                    self.train_losses.append(raw_loss)
+                    self._log_step(global_step, raw_loss)
 
-                    if metrics["eval_accuracy"] > best_accuracy:
-                        best_accuracy = metrics["eval_accuracy"]
-                        save_model(self.model, self.tokenizer, f"{run_name}-best")
-                        print(f"  New best model saved at step {global_step} "
-                              f"(accuracy={best_accuracy:.1%})")
+                    if eval_dataset and global_step % self.config.eval_every == 0:
+                        metrics = self.evaluate(eval_dataset)
+                        self._log_eval(global_step, metrics)
+                        self.eval_steps.append(global_step)
+                        self.eval_losses.append(metrics["eval_loss"])
 
-            avg_epoch_loss = epoch_loss / steps_per_epoch
+                        if metrics["eval_accuracy"] > best_accuracy:
+                            best_accuracy = metrics["eval_accuracy"]
+                            save_model(self.model, self.tokenizer, f"{run_name}-best")
+                            print(f"  New best model saved at step {global_step} "
+                                  f"(accuracy={best_accuracy:.1%})")
+
+            avg_epoch_loss = epoch_loss / max(epoch_optimizer_steps, 1)
             print(f"Epoch {epoch + 1:>2d}/{self.config.epochs} | Avg Loss: {avg_epoch_loss:.4f}")
             print("-" * 50)
 

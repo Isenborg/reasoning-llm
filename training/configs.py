@@ -28,10 +28,12 @@ class GRPOConfig:
 class SFTConfig:
     lr: float = 5e-5
     epochs: int = 3
-    batch_size: int = 8
-    max_length: int = 512       # Max tokens per example (longer examples are dropped)
+    batch_size: int = 2                  # Keep small to fit in VRAM
+    grad_accum_steps: int = 4            # Effective batch = batch_size * grad_accum_steps
+    max_length: int = 384                # Drop examples longer than this
     grad_clip: float = 1.0
+    gradient_checkpointing: bool = True  # Trade compute for memory
 
     # Eval
-    eval_every: int = 200       # Steps between evals
+    eval_every: int = 200       # Steps between evals (counts optimizer steps)
     eval_samples: int = 100     # Number of eval examples to use
