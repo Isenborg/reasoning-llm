@@ -6,7 +6,7 @@ import torch
 import matplotlib.pyplot as plt
 from datasets import load_dataset
 
-from grpo.functions import generate_completions
+from grpo.utils import generate_rollouts
 
 
 # ---------- Generators ---------- #
@@ -110,7 +110,15 @@ def extract_predicted_int(text: str) -> int | None:
     if not nums:
         return None
 
-    x = float(nums[-1])
+    try:
+        x = float(nums[-1])
+    except OverflowError:
+        return None
+    except ValueError:
+        return None
+
+    if not math.isfinite(x):
+        return None
 
     # GSM8K answers are integers; accept example 18.0
     if abs(x - round(x)) < 1e-6:
@@ -311,29 +319,25 @@ def evaluate_sft(
 
     for start in range(0, len(ds), batch_size):
         batch = ds.select(range(start, min(start + batch_size, len(ds))))
-        prompt_texts = [
+        questions = [
             generate_prompt(ex["question"], helper=helper, prompt_style=prompt_style)
             for ex in batch
         ]
 
         # Generate one completion per prompt
-        _, _, all_texts, all_group_idx = generate_completions(
+        rollouts = generate_rollouts(
             model=model,
             tokenizer=tokenizer,
-            prompt_texts=prompt_texts,
+            questions=questions,
             G=1,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
         )
 
-        # Map completions back to prompts
-        grouped = [[] for _ in range(len(prompt_texts))]
-        for txt, gi in zip(all_texts, all_group_idx):
-            grouped[gi].append(txt)
-
         for i, ex in enumerate(batch):
+            completion = rollouts[i]["response_texts"][0] if rollouts[i]["response_texts"] else ""
             gold = extract_gsm8k_gold(ex["answer"])
-            completion = grouped[i][0] if grouped[i] else ""
+            
 
             pred = extract_predicted_int(completion)
             correct = (pred is not None and gold is not None and pred == gold)
