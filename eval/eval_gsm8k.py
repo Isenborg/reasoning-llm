@@ -3,6 +3,7 @@ from collections import Counter
 
 import math
 import torch
+import matplotlib.pyplot as plt
 from datasets import load_dataset
 
 from grpo.functions import generate_completions
@@ -274,3 +275,158 @@ def evaluate_gsm8k_maj16(
         "avg_think_tokens_per_maj_sample": (total_think_tokens / total_completions) if total_completions else 0.0,
         "avg_completion_tokens_per_maj_sample": (total_completion_tokens / total_completions) if total_completions else 0.0,
     }
+
+
+# ---------- SFT evaluation with plots ---------- #
+
+@torch.no_grad()
+def evaluate_sft(
+    model,
+    tokenizer,
+    split: str = "test",
+    n_examples: int | None = None,
+    batch_size: int = 8,
+    temperature: float = 0.3,
+    max_new_tokens: int = 512,
+    helper: str = "<think>",
+    prompt_style: str = "deepseek",
+    show_examples: int = 2,
+):
+    """
+    Evaluate the SFT model on GSM8K and produce two plots:
+      1. Cumulative accuracy over questions
+      2. Distribution of think tokens per response
+
+    Returns a metrics dict and the per-question records.
+    """
+    ds = load_dataset("gsm8k", "main")[split]
+    if n_examples is not None:
+        ds = ds.select(range(min(n_examples, len(ds))))
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    records = []          # one dict per question
+    example_printed = 0
+
+    for start in range(0, len(ds), batch_size):
+        batch = ds.select(range(start, min(start + batch_size, len(ds))))
+        prompt_texts = [
+            generate_prompt(ex["question"], helper=helper, prompt_style=prompt_style)
+            for ex in batch
+        ]
+
+        # Generate one completion per prompt
+        _, _, all_texts, all_group_idx = generate_completions(
+            model=model,
+            tokenizer=tokenizer,
+            prompt_texts=prompt_texts,
+            G=1,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+
+        # Map completions back to prompts
+        grouped = [[] for _ in range(len(prompt_texts))]
+        for txt, gi in zip(all_texts, all_group_idx):
+            grouped[gi].append(txt)
+
+        for i, ex in enumerate(batch):
+            gold = extract_gsm8k_gold(ex["answer"])
+            completion = grouped[i][0] if grouped[i] else ""
+
+            pred = extract_predicted_int(completion)
+            correct = (pred is not None and gold is not None and pred == gold)
+            think_toks = count_think_tokens(completion, tokenizer)
+            has_think = think_toks > 0
+            has_answer = extract_answer_tag_int(completion) is not None
+
+            records.append({
+                "question": ex["question"],
+                "gold": gold,
+                "pred": pred,
+                "correct": correct,
+                "think_tokens": think_toks,
+                "has_think": has_think,
+                "has_answer": has_answer,
+                "completion": completion,
+            })
+
+            if example_printed < show_examples:
+                print(f"\n--- Example {example_printed + 1} ---")
+                print(f"Q: {ex['question'][:120]}...")
+                print(f"Gold: {gold}  |  Pred: {pred}  |  {'CORRECT' if correct else 'WRONG'}")
+                print(f"Think tokens: {think_toks}")
+                print(f"Response: {completion[:300]}...")
+                example_printed += 1
+
+    # ── Metrics ──────────────────────────────────────────────────────────────
+    total = len(records)
+    n_correct = sum(r["correct"] for r in records)
+    n_no_extract = sum(r["pred"] is None for r in records)
+    n_has_think = sum(r["has_think"] for r in records)
+    think_tokens = [r["think_tokens"] for r in records]
+    avg_think = sum(think_tokens) / total if total else 0.0
+
+    metrics = {
+        "accuracy": n_correct / total,
+        "no_extract_rate": n_no_extract / total,
+        "think_block_rate": n_has_think / total,
+        "avg_think_tokens": avg_think,
+        "total": total,
+    }
+
+    print(f"\n{'='*50}")
+    print(f"GSM8K {split} — {total} examples")
+    print(f"  Accuracy        : {metrics['accuracy']:.1%}")
+    print(f"  No extract rate : {metrics['no_extract_rate']:.1%}")
+    print(f"  Think block rate: {metrics['think_block_rate']:.1%}")
+    print(f"  Avg think tokens: {avg_think:.1f}")
+    print(f"{'='*50}")
+
+    # ── Plots ─────────────────────────────────────────────────────────────────
+    _plot_sft_results(records, metrics)
+
+    return metrics, records
+
+
+def _plot_sft_results(records, metrics):
+    """Two-panel plot: cumulative accuracy + think token distribution."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4))
+
+    # --- Panel 1: Cumulative accuracy ---
+    cumulative_correct = 0
+    cumulative_acc = []
+    for r in records:
+        cumulative_correct += r["correct"]
+        cumulative_acc.append(cumulative_correct / (len(cumulative_acc) + 1))
+
+    ax1.plot(range(1, len(cumulative_acc) + 1), cumulative_acc,
+             color="steelblue", linewidth=1.5)
+    ax1.axhline(metrics["accuracy"], color="tomato", linestyle="--", linewidth=1.2,
+                label=f"Final accuracy: {metrics['accuracy']:.1%}")
+    ax1.set_xlabel("Questions evaluated")
+    ax1.set_ylabel("Cumulative accuracy")
+    ax1.set_title("Accuracy on GSM8K test set")
+    ax1.set_ylim(0, 1)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # --- Panel 2: Think token distribution ---
+    think_tokens = [r["think_tokens"] for r in records]
+    n_zero = sum(t == 0 for t in think_tokens)
+    n_nonzero = [t for t in think_tokens if t > 0]
+
+    if n_nonzero:
+        ax2.hist(n_nonzero, bins=30, color="mediumpurple", alpha=0.8, edgecolor="white")
+    ax2.axvline(metrics["avg_think_tokens"], color="tomato", linestyle="--", linewidth=1.5,
+                label=f"Mean: {metrics['avg_think_tokens']:.0f} tokens")
+    ax2.set_xlabel("Think tokens per response")
+    ax2.set_ylabel("Number of responses")
+    ax2.set_title(f"Think token distribution\n({n_zero}/{len(records)} responses had no <think> block)")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.suptitle("SFT Model — GSM8K Evaluation", fontweight="bold")
+    plt.tight_layout()
+    plt.show()
