@@ -8,8 +8,8 @@ from data.gsm8k import GSM8KDataset
 from rewards import rewards
 
 # ── Model ──
-model_name = "Qwen/Qwen3-1.7B-Base"
-run_name = "grpo-qwen3-gsm8k-run2"
+model_name = "grpo-qwen3-gsm8k-run4-cont-step2000"
+run_name = "grpo-qwen3-gsm8k-run4-cont2000"
 
 model = models.load_model(model_name)
 tokenizer = models.load_tokenizer(model_name)
@@ -23,12 +23,12 @@ config = GRPOConfig(
     lr=5e-6,
     epsilon=0.2,
     temperature=1.0,
-    max_new_tokens=512,
-    max_steps=5000,
+    max_new_tokens=768,
+    max_steps=3000,
     use_8bit_optim=True,
-    use_wandb=False,
+    use_wandb=True,
     use_kl=False,
-    run_sft_warmup=True,
+    run_sft_warmup=False,
     eval_every=100,
     eval_samples=64,
     save_freq=500
@@ -68,5 +68,6 @@ trainer.train(
     dataset=train_dataset,
     eval_dataset=test_dataset,
     run_name=run_name,
-    run_id=run_name
+    run_id=run_name,
+    resume_from=model_name
 )
