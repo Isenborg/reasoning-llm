@@ -34,6 +34,14 @@ class SFTConfig:
     grad_clip: float = 1.0
     gradient_checkpointing: bool = True  # Trade compute for memory
 
+    # LoRA
+    use_lora: bool = True
+    lora_r: int = 16            # Rank — higher = more capacity, more memory
+    lora_alpha: int = 32        # Scaling factor (alpha/r = effective scale)
+    lora_dropout: float = 0.05
+    # Which linear layers to inject LoRA into (None = peft auto-detects all)
+    lora_target_modules: list = None
+
     # Eval
     eval_every: int = 200       # Steps between evals (counts optimizer steps)
     eval_samples: int = 100     # Number of eval examples to use

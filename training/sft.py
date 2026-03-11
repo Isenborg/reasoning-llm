@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
+from peft import LoraConfig, get_peft_model, TaskType
 
 from training.configs import SFTConfig
 from utils.checks import is_correct_answer
@@ -53,13 +54,28 @@ class SFTTrainer:
         tokenizer: PreTrainedTokenizer,
         config: SFTConfig,
     ):
-        self.model = model
         self.tokenizer = tokenizer
         self.config = config
-        self.optimizer = AdamW(self.model.parameters(), lr=config.lr)
+
+        if config.use_lora:
+            lora_cfg = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=config.lora_r,
+                lora_alpha=config.lora_alpha,
+                lora_dropout=config.lora_dropout,
+                target_modules=config.lora_target_modules,  # None = auto-detect
+                bias="none",
+            )
+            self.model = get_peft_model(model, lora_cfg)
+            self.model.print_trainable_parameters()
+        else:
+            self.model = model
 
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
+
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = AdamW(trainable, lr=config.lr)
 
         # Loss history for plotting
         self.train_steps: list[int] = []
@@ -138,7 +154,7 @@ class SFTTrainer:
 
                         if metrics["eval_accuracy"] > best_accuracy:
                             best_accuracy = metrics["eval_accuracy"]
-                            save_model(self.model, self.tokenizer, f"{run_name}-best")
+                            self._save(f"{run_name}-best")
                             print(f"  New best model saved at step {global_step} "
                                   f"(accuracy={best_accuracy:.1%})")
 
@@ -228,6 +244,19 @@ class SFTTrainer:
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.show()
+
+    def _save(self, name: str):
+        """Save adapter weights (LoRA) or the full model."""
+        if self.config.use_lora:
+            # Save only the small adapter weights (~MB instead of ~GB)
+            from utils.models import DEFAULT_MODEL_DIR
+            save_path = DEFAULT_MODEL_DIR / name
+            save_path.mkdir(parents=True, exist_ok=True)
+            self.model.save_pretrained(save_path)
+            self.tokenizer.save_pretrained(save_path)
+            print(f"LoRA adapter saved to: {save_path}")
+        else:
+            save_model(self.model, self.tokenizer, name)
 
     def _log_step(self, step: int, loss: float):
         if step % 10 == 0:
