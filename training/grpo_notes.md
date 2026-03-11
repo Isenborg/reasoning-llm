@@ -1,6 +1,8 @@
 # Notes from Run 4.
 Run 4 is our longest running GRPO training. Since training is very long and the fact that we will run into problems, we made this document to note some of the things we do during training which might have an effect on the training run.
 
+* One thing to note about our separate starts of the GRPOTrainer, is the fact that we dont filter out already seen examples. This means that a resumed training run might use the same data that was previously used, which means we will get duplicates. This is something that should probably be fixed later on.
+
 1. Training stopped on step ~ 700, with out latest checkpoint being at step 500.
     * This cause issues with the graph, since we could not override the old logged steps, the two graphs are overlapping between step 500-700
     * We did not have the training state saved at this point, this was implemented, and we created a manual training state with global step = 500. We could not save the optim state. 
