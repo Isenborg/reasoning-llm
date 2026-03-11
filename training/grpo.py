@@ -434,6 +434,11 @@ class GRPOTrainer:
                     examples_per_hour = examples_seen / max(
                         total_time / 3600, 1e-9
                     )
+                    if resume_from:
+                        examples_per_hour = (examples_seen - state["examples_seen"]) / max(
+                            total_time / 3600, 1e-9
+                        )
+
 
                     print(
                         f"  Step {global_step:>4d} | "
