@@ -4,9 +4,9 @@ import matplotlib.pyplot as plt
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
-from peft import LoraConfig, get_peft_model, TaskType
 
 from training.configs import SFTConfig
+from utils.lora import apply_lora, save_lora
 from utils.checks import is_correct_answer
 from utils import lmprint
 from utils.models import save_model
@@ -58,16 +58,13 @@ class SFTTrainer:
         self.config = config
 
         if config.use_lora:
-            lora_cfg = LoraConfig(
-                task_type=TaskType.CAUSAL_LM,
+            self.model = apply_lora(
+                model,
                 r=config.lora_r,
-                lora_alpha=config.lora_alpha,
-                lora_dropout=config.lora_dropout,
-                target_modules=config.lora_target_modules,  # None = auto-detect
-                bias="none",
+                alpha=config.lora_alpha,
+                dropout=config.lora_dropout,
+                target_modules=config.lora_target_modules,
             )
-            self.model = get_peft_model(model, lora_cfg)
-            self.model.print_trainable_parameters()
         else:
             self.model = model
 
@@ -247,14 +244,11 @@ class SFTTrainer:
 
     def _save(self, name: str):
         """Save adapter weights (LoRA) or the full model."""
+        from utils.models import DEFAULT_MODEL_DIR
+        save_path = DEFAULT_MODEL_DIR / name
         if self.config.use_lora:
-            # Save only the small adapter weights (~MB instead of ~GB)
-            from utils.models import DEFAULT_MODEL_DIR
-            save_path = DEFAULT_MODEL_DIR / name
-            save_path.mkdir(parents=True, exist_ok=True)
-            self.model.save_pretrained(save_path)
+            save_lora(self.model, save_path)
             self.tokenizer.save_pretrained(save_path)
-            print(f"LoRA adapter saved to: {save_path}")
         else:
             save_model(self.model, self.tokenizer, name)
 
