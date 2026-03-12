@@ -3,7 +3,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from training.configs import GRPOConfig
 
 
-def generate_prompt(question, helper=""):
+def generate_prompt(question):
     """
     Wraps a question into the DeepSeek-R1 prompt format.
     """
@@ -12,7 +12,7 @@ def generate_prompt(question, helper=""):
         "The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. "
         "The reasoning process and answer are enclosed within <think>...</think> and <answer>...</answer> tags, "
         "respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>. "
-        f"User: {question} Assistant: {helper}"
+        f"User: {question} Assistant: "
     )
     return prompt
 
