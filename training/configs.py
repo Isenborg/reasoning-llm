@@ -44,5 +44,22 @@ class SFTWarmupConfig:
 
 @dataclass
 class SFTConfig:
-    # TODO
-    pass
+    lr: float = 5e-5
+    epochs: int = 3
+    batch_size: int = 2                  # Keep small to fit in VRAM
+    grad_accum_steps: int = 4            # Effective batch = batch_size * grad_accum_steps
+    max_length: int = 384                # Drop examples longer than this
+    grad_clip: float = 1.0
+    gradient_checkpointing: bool = True  # Trade compute for memory
+
+    # LoRA
+    use_lora: bool = True
+    lora_r: int = 16            # Rank — higher = more capacity, more memory
+    lora_alpha: int = 32        # Scaling factor (alpha/r = effective scale)
+    lora_dropout: float = 0.05
+    # Which linear layers to inject LoRA into (None = peft auto-detects all)
+    lora_target_modules: list = None
+
+    # Eval
+    eval_every: int = 200       # Steps between evals (counts optimizer steps)
+    eval_samples: int = 100     # Number of eval examples to use
