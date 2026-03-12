@@ -241,12 +241,16 @@ def stream_generate(model, tokenizer, prompt: str, settings: ChatSettings):
 
 def _print_char(ch: str, state: str):
     """Print a single character with style based on current state."""
+    from rich.text import Text
+
     if state == "thinking":
-        console.print(f"[dim italic]{ch}[/]", end="", highlight=False)
+        text = Text(ch, style="dim italic")
     elif state == "answering":
-        console.print(f"[bold green]{ch}[/]", end="", highlight=False)
+        text = Text(ch, style="bold green")
     else:
-        console.print(ch, end="", highlight=False)
+        text = Text(ch)
+
+    console.print(text, end="")
 
 
 # ── Chat Loop ────────────────────────────────────────────────────────────────
