@@ -137,3 +137,42 @@ def load_checkpoint(name: str, optimizer=None, model_dir: Path = DEFAULT_MODEL_D
     )
 
     return state
+
+def list_models(model_dir: Path = DEFAULT_MODEL_DIR) -> list[str]:
+    """Return list of locally cached model names."""
+    if not model_dir.exists():
+        return []
+    return sorted(
+        str(cfg.parent.relative_to(model_dir))
+        for cfg in model_dir.rglob("config.json")
+    )
+
+
+def download_model(model_name: str, model_dir: Path = DEFAULT_MODEL_DIR):
+    """Download model + tokenizer to local cache, then free VRAM.
+    All output is suppressed."""
+    import contextlib
+    import io
+    import os
+    import gc
+    import logging
+
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+    loggers = [logging.getLogger(n) for n in ("transformers", "huggingface_hub")]
+    prev_levels = [(lgr, lgr.level) for lgr in loggers]
+    for lgr in loggers:
+        lgr.setLevel(logging.ERROR)
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            model = load_model(model_name, model_dir)
+            tokenizer = load_tokenizer(model_name, model_dir)
+        del model, tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    finally:
+        for lgr, lvl in prev_levels:
+            lgr.setLevel(lvl)
+        os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
