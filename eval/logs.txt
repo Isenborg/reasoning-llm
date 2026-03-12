@@ -154,6 +154,29 @@ Results (1319 examples):
   total time:          1691.1s
 
 
+  Results (1319 examples):
+  Model used:          grpo-qwen3-gsm8k-run4-cont-step2000
+  pass@1 (greedy):     0.8105
+  pass@1 (sampled):    0.8007
+  maj@32:              0.8779
+  degeneration rate:   0.0255
+  temperature:         1.0
+  avg tok/resp:        202
+  throughput:          5213 tok/s
+  total time:          1689.3s
+
+  Results (1319 examples):
+  Model used:          Qwen/Qwen3-1.7B-Base
+  pass@1 (greedy):     0.5330
+  pass@1 (sampled):    0.3124
+  maj@16:              0.7589
+  degeneration rate:   0.0952
+  temperature:         1.0
+  avg tok/resp:        435
+  throughput:          3551 tok/s
+  total time:          2753.3s
+
+
   -----------------------------
   Higher K
 
@@ -226,3 +249,14 @@ Results (1319 examples):
   avg tok/resp:        202
   throughput:          5461 tok/s
   total time:          512.2s
+
+  Results (248 examples):
+  Model used:          grpo-qwen3-gsm8k-run4-cont-step2000
+  pass@1 (greedy):     0.7984
+  pass@1 (sampled):    0.7830
+  maj@128:              0.8629
+  degeneration rate:   0.0309
+  temperature:         1.0
+  avg tok/resp:        196
+  throughput:          5422 tok/s
+  total time:          1157.8s
