@@ -318,6 +318,33 @@ def evaluate_gsm8k_vllm(
 
 
 # ---------- SFT evaluation with plots ---------- #
+from grpo.utils import generate_rollouts
+
+
+
+def extract_gsm8k_gold(answer_str: str) -> int | None:
+    # GSM8K answers contain: "\n#### 42"
+    m = re.search(r"####\s*(-?\d+)", answer_str)
+    return int(m.group(1)) if m else None
+
+
+def extract_answer_tag_int(text: str) -> int | None:
+    # Prefer <answer> ... </answer>
+    m = re.search(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    inner = m.group(1)
+    nums = re.findall(r"-?\d+", inner)
+    return int(nums[-1]) if nums else None
+
+def count_think_tokens(text: str, tokenizer) -> int:
+    """Count tokenizer tokens inside <think>...</think>. Returns 0 if missing."""
+    m = re.search(r"<think>\s*(.*?)\s*</think>", text, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return 0
+    think_text = m.group(1)
+    # Tokenize without special tokens for a fair token count
+    return len(tokenizer.encode(think_text, add_special_tokens=False))
 
 @torch.no_grad()
 def evaluate_sft(
