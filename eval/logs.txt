@@ -94,6 +94,17 @@ Results (128 examples):
 
 --------------------------------------------------------
 Full:
+Results (1319 examples):
+  Model used:          grpo-qwen3-gsm8k-run4-cont2000-final
+  pass@1 (greedy):     0.8203
+  pass@1 (sampled):    0.8085
+  maj@16:              0.8810
+  degeneration rate:   0.0230
+  temperature:         1.0
+  avg tok/resp:        203
+  throughput:          5229 tok/s
+  total time:          874.9s
+
 
 Results (1319 examples):
   Model used:          grpo-qwen3-gsm8k-run4-cont-step2000
@@ -103,7 +114,8 @@ Results (1319 examples):
   degeneration rate:   0.0262
   temperature:         1.0
   avg tok/resp:        201
-  throughput:          5138 tok/s
+  throughput:          5138 t
+ok/s
   total time:          880.3s
 
 
