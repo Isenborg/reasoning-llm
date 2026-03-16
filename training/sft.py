@@ -1,3 +1,4 @@
+import time
 import random
 import torch
 import matplotlib.pyplot as plt
@@ -10,6 +11,7 @@ from utils.lora import apply_lora, save_lora
 from utils.checks import is_correct_answer
 from utils import lmprint
 from utils.models import save_model
+from grpo.utils import generate_prompt, generate_rollouts
 
 
 def _collate_fn(batch, pad_token_id: int):
@@ -68,6 +70,11 @@ class SFTTrainer:
         else:
             self.model = model
 
+        # Speedups
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        self.model = torch.compile(self.model)
+
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
@@ -79,6 +86,7 @@ class SFTTrainer:
         self.train_losses: list[float] = []
         self.eval_steps: list[int] = []
         self.eval_losses: list[float] = []
+        self._step_times = []
 
     def train(self, train_dataset, eval_dataset=None, run_name: str = "sft_model"):
         pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
@@ -88,6 +96,8 @@ class SFTTrainer:
             batch_size=self.config.batch_size,
             shuffle=True,
             collate_fn=lambda batch: _collate_fn(batch, pad_id),
+            num_workers=4,
+            pin_memory=True,
         )
 
         G = self.config.grad_accum_steps
@@ -109,9 +119,16 @@ class SFTTrainer:
 
         self.model.train()
         self.optimizer.zero_grad()
-        global_step = 0       # counts optimizer steps
-        micro_step = 0        # counts forward passes
-        best_accuracy = 0.0
+        global_step = 0
+        micro_step = 0
+        best_eval_loss = float("inf")
+        accum_loss = 0.0
+
+        # Throughput tracking
+        step_tokens = 0
+        step_start = time.time()
+        total_tokens = 0
+        train_start = time.time()
 
         for epoch in range(self.config.epochs):
             epoch_loss = 0.0
@@ -120,15 +137,18 @@ class SFTTrainer:
             for batch in dataloader:
                 batch = {k: v.to(self.model.device) for k, v in batch.items()}
 
+                # Count real (non-padding) tokens in this micro-batch
+                batch_tokens = batch["attention_mask"].sum().item()
+                step_tokens += batch_tokens
+                total_tokens += batch_tokens
+
                 outputs = self.model(**batch)
-                # Scale loss so gradients are averaged across accumulation steps
                 loss = outputs.loss / G
                 loss.backward()
                 micro_step += 1
 
-                # Record the unscaled loss for logging
-                raw_loss = outputs.loss.item()
-                epoch_loss += raw_loss
+                # Accumulate unscaled loss across micro-batches
+                accum_loss += outputs.loss.item()
 
                 if micro_step % G == 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -139,9 +159,33 @@ class SFTTrainer:
                     global_step += 1
                     epoch_optimizer_steps += 1
 
+                    # Average loss over all micro-batches in this step
+                    avg_loss = accum_loss / G
+                    accum_loss = 0.0
+
+                    epoch_loss += avg_loss
+
+                    # Calculate tokens/sec for this optimizer step
+                    step_elapsed = time.time() - step_start
+                    tok_per_sec = step_tokens / step_elapsed if step_elapsed > 0 else 0
+
+                    # ETA based on elapsed time and step progress
+                    elapsed = time.time() - train_start
+                    remaining_steps = total_optimizer_steps - global_step
+                    # Moving average step time
+                    self._step_times.append(step_elapsed)
+                    window = self._step_times[-50:]
+                    sec_per_step = sum(window) / len(window)
+                    
+                    eta_seconds = remaining_steps * sec_per_step
+
                     self.train_steps.append(global_step)
-                    self.train_losses.append(raw_loss)
-                    self._log_step(global_step, raw_loss)
+                    self.train_losses.append(avg_loss)
+                    self._log_step(global_step, total_optimizer_steps, avg_loss, tok_per_sec, eta_seconds)
+
+                    # Reset for next optimizer step
+                    step_tokens = 0
+                    step_start = time.time()
 
                     if eval_dataset and global_step % self.config.eval_every == 0:
                         metrics = self.evaluate(eval_dataset)
@@ -149,11 +193,8 @@ class SFTTrainer:
                         self.eval_steps.append(global_step)
                         self.eval_losses.append(metrics["eval_loss"])
 
-                        if metrics["eval_accuracy"] > best_accuracy:
-                            best_accuracy = metrics["eval_accuracy"]
-                            self._save(f"{run_name}-best")
-                            print(f"  New best model saved at step {global_step} "
-                                  f"(accuracy={best_accuracy:.1%})")
+                        # Reset timer so eval time isn't counted
+                        step_start = time.time()
 
             avg_epoch_loss = epoch_loss / max(epoch_optimizer_steps, 1)
             print(f"Epoch {epoch + 1:>2d}/{self.config.epochs} | Avg Loss: {avg_epoch_loss:.4f}")
@@ -166,54 +207,54 @@ class SFTTrainer:
             self.eval_steps.append(global_step)
             self.eval_losses.append(metrics["eval_loss"])
 
+        # Overall throughput
+        total_elapsed = time.time() - train_start
+        avg_tok_per_sec = total_tokens / total_elapsed if total_elapsed > 0 else 0
+
         self.model.eval()
         print(f"SFT complete. {global_step} steps over {self.config.epochs} epochs.")
-        self.plot_losses()
+        print(f"Total tokens: {total_tokens:,} | "
+              f"Time: {self._format_eta(total_elapsed)}")
+        if self.config.plot_training:
+            self.plot_losses()
+
+        self._save(run_name)
 
     @torch.no_grad()
-    def evaluate(self, eval_dataset, prompt_template=None, temperature: float = 0.3) -> dict:
+    def evaluate(self, eval_dataset, generate: bool = False) -> dict:
         """
-        Evaluate by generating answers and checking exact-match accuracy.
-
-        If prompt_template is None, skips generation-based eval and only
-        reports perplexity-style loss on the eval set.
+        Loss eval (fast, every N steps) + optional generation eval (slow, end of epoch).
         """
         self.model.eval()
 
         n = min(self.config.eval_samples, len(eval_dataset))
         indices = random.sample(range(len(eval_dataset)), n)
 
+        # 1. Teacher-forced loss (always)
         total_loss = 0.0
-        num_batches = 0
-
         for idx in indices:
             sample = eval_dataset[idx]
             input_ids = sample["input_ids"].unsqueeze(0).to(self.model.device)
             labels = sample["labels"].unsqueeze(0).to(self.model.device)
             attention_mask = sample["attention_mask"].unsqueeze(0).to(self.model.device)
 
-            outputs = self.model(
-                input_ids=input_ids,
-                labels=labels,
-                attention_mask=attention_mask,
-            )
+            outputs = self.model(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
             total_loss += outputs.loss.item()
-            num_batches += 1
 
         metrics = {
-            "eval_loss": total_loss / max(num_batches, 1),
+            "eval_loss": total_loss / n,
             "eval_samples": n,
-            "eval_accuracy": float("nan"),  # requires generation; see below
         }
 
         self.model.train()
         return metrics
 
-    def plot_losses(self):
-        """Plot training (and optional eval) loss curves."""
-        _, ax = plt.subplots(figsize=(9, 4))
+    def plot_losses(self, save_path: str = "sft_training_loss.png"):
+        """Plot training (and optional eval) loss curves and save to file."""
+        fig, ax = plt.subplots(figsize=(9, 4))
 
-        ax.plot(self.train_steps, self.train_losses, linewidth=0.8, alpha=0.4, color="steelblue", label="train loss (per step)")
+        ax.plot(self.train_steps, self.train_losses, linewidth=0.8, alpha=0.4,
+                color="steelblue", label="train loss (per step)")
 
         # Smoothed training loss (50-step rolling average)
         if len(self.train_losses) >= 10:
@@ -222,17 +263,21 @@ class SFTTrainer:
                 sum(self.train_losses[max(0, i - window):i]) / min(i, window)
                 for i in range(1, len(self.train_losses) + 1)
             ]
-            ax.plot(self.train_steps, smoothed, linewidth=2, color="steelblue", label=f"train loss (smoothed, w={window})")
+            ax.plot(self.train_steps, smoothed, linewidth=2, color="steelblue",
+                    label=f"train loss (smoothed, w={window})")
 
         if self.eval_losses:
-            ax.plot(self.eval_steps, self.eval_losses, "o-", linewidth=2, color="tomato", markersize=5, label="eval loss")
+            ax.plot(self.eval_steps, self.eval_losses, "o-", linewidth=2,
+                    color="tomato", markersize=5, label="eval loss")
 
         # Epoch boundary lines
         total_steps = self.train_steps[-1] if self.train_steps else 0
         steps_per_epoch = total_steps // self.config.epochs if self.config.epochs > 1 else 0
         for e in range(1, self.config.epochs):
-            ax.axvline(e * steps_per_epoch, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-            ax.text(e * steps_per_epoch + 2, ax.get_ylim()[1] * 0.97, f"epoch {e+1}", fontsize=7, color="gray", va="top")
+            ax.axvline(e * steps_per_epoch, color="gray", linestyle="--",
+                    linewidth=0.8, alpha=0.6)
+            ax.text(e * steps_per_epoch + 2, ax.get_ylim()[1] * 0.97,
+                    f"epoch {e+1}", fontsize=7, color="gray", va="top")
 
         ax.set_xlabel("Step")
         ax.set_ylabel("Loss")
@@ -240,7 +285,9 @@ class SFTTrainer:
         ax.legend()
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.show()
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+        print(f"Training plot saved to {save_path}")
 
     def _save(self, name: str):
         """Save adapter weights (LoRA) or the full model."""
@@ -252,16 +299,26 @@ class SFTTrainer:
         else:
             save_model(self.model, self.tokenizer, name)
 
-    def _log_step(self, step: int, loss: float):
+    def _log_step(self, step: int, total_steps: int, loss: float, tok_per_sec: float, eta_seconds: float):
         if step % 10 == 0:
-            print(f"  Step {step:>5d} | Loss: {loss:.4f}")
+            print(f"  Step {step:>5d}/{total_steps} | Loss: {loss:.4f} | "
+                  f"{tok_per_sec:,.0f} tok/s | ETA: {self._format_eta(eta_seconds)}")
 
     def _log_eval(self, step: int, metrics: dict):
-        acc = metrics.get("eval_accuracy")
-        acc_str = f"{acc:.1%}" if acc == acc else "n/a"  # nan check
         print(
             f"\n  [EVAL @ step {step}] "
             f"Loss: {metrics['eval_loss']:.4f} | "
-            f"Accuracy: {acc_str} | "
             f"Samples: {metrics['eval_samples']}\n"
         )
+
+    def _format_eta(self, seconds: float) -> str:
+        """Format seconds into a human-readable string."""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            m, s = divmod(seconds, 60)
+            return f"{int(m)}m {int(s)}s"
+        else:
+            h, remainder = divmod(seconds, 3600)
+            m, s = divmod(remainder, 60)
+            return f"{int(h)}h {int(m)}m {int(s)}s"
