@@ -22,11 +22,17 @@ train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
 
 print(f"Train: {len(train_dataset)} | Eval: {len(eval_dataset)}")
 
+
 config = SFTConfig(
     batch_size=4,
     grad_accum_steps=4,
-    epochs=1,
+    epochs=2,
+    gradient_checkpointing=True,
+    use_lora=False,
+    use_8bit_optim=True,
 )
 
 trainer = SFTTrainer(model, tokenizer, config)
 trainer.train(train_dataset=train_dataset, eval_dataset=eval_dataset, run_name="sft_training")
+
+
