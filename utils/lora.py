@@ -48,12 +48,6 @@ def apply_lora(
     dropout: float = 0.05,
     target_modules: list[str] | None = None,
 ) -> nn.Module:
-    """
-    Freeze the entire model, then replace every linear layer whose name ends
-    with one of the target_module suffixes with a LoRALinear.
-
-    Default targets cover the attention projections used by Qwen / LLaMA style models.
-    """
     if target_modules is None:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -68,7 +62,6 @@ def apply_lora(
         if not any(full_name.endswith(t) for t in target_modules):
             continue
 
-        # Navigate to the parent and swap the child
         *parent_parts, child_name = full_name.split(".")
         parent = model
         for part in parent_parts:
@@ -76,6 +69,11 @@ def apply_lora(
 
         setattr(parent, child_name, LoRALinear(module, r=r, alpha=alpha, dropout=dropout))
         replaced += 1
+
+    # Unfreeze embedding layer (tied with lm_head) so model can learn special tokens
+    for name, param in model.named_parameters():
+        if "embed_tokens" in name:
+            param.requires_grad = True
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -107,4 +105,26 @@ def load_lora(model: nn.Module, path) -> nn.Module:
     adapter_state = torch.load(Path(path) / "lora_adapter.pt", map_location="cpu")
     missing, unexpected = model.load_state_dict(adapter_state, strict=False)
     print(f"LoRA adapter loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+    return model
+
+
+def merge_lora(model: nn.Module) -> nn.Module:
+    """Merge LoRA weights into base linear layers and remove adapters."""
+    merged = 0
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, LoRALinear):
+            continue
+
+        # W_new = W_original + scale * B @ A
+        module.linear.weight.data += module.scale * (module.lora_B @ module.lora_A)
+
+        # Replace LoRALinear with the merged Linear
+        *parent_parts, child_name = name.split(".")
+        parent = model
+        for part in parent_parts:
+            parent = getattr(parent, part)
+        setattr(parent, child_name, module.linear)
+        merged += 1
+
+    print(f"Merged {merged} LoRA layers into base model")
     return model
