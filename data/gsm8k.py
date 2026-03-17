@@ -73,23 +73,33 @@ class GSM8KSFTDataset(Dataset):
             cot = example["reasoning_nemotron_70B"]
             # Nemotron reasoning uses "<reasoning> instead of <think> tokens", lets format the data for our model.
             reasoning = self._extract_reasoning(cot)
+
+            if not answer:
+                print(f"[SKIP] No answer extracted for solution: {solution[:100]!r}...")
+                continue
+            if not reasoning:
+                print(f"[SKIP] No reasoning extracted for cot: {cot!r}...")
+                continue
+
             prompt = prompt_template(question)
             completion = f"<think>\n{reasoning}\n</think>\n<answer>{answer}</answer>"
 
             prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
             completion_ids = tokenizer.encode(completion, add_special_tokens=False)
+            completion_ids = completion_ids + [tokenizer.eos_token_id]  # ← add EOS
 
             full_ids = prompt_ids + completion_ids
+            labels = [-100] * len(prompt_ids) + completion_ids
 
             if len(full_ids) > max_length:
                 continue
-
-            labels = [-100] * len(prompt_ids) + completion_ids
 
             self.samples.append({
                 "input_ids": torch.tensor(full_ids, dtype=torch.long),
                 "labels": torch.tensor(labels, dtype=torch.long),
                 "attention_mask": torch.ones(len(full_ids), dtype=torch.long),
+                "input_text": prompt,
+                "completion_text": completion,
             })
 
         print(f"GSM8KSFTDataset: {len(self.samples)} examples ({split}, max_length={max_length})")
