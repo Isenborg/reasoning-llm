@@ -44,7 +44,7 @@ class SFTWarmupConfig:
 
 @dataclass
 class SFTConfig:
-    lr: float = 2e-4
+    lr: float = 2e-5
     epochs: int = 3
     batch_size: int = 2                  # Keep small to fit in VRAM
     grad_accum_steps: int = 4            # Effective batch = batch_size * grad_accum_steps
@@ -64,3 +64,6 @@ class SFTConfig:
     # Eval
     eval_every: int = 100       # Steps between evals (counts optimizer steps)
     eval_samples: int = 128     # Number of eval examples to use
+
+    use_8bit_optim: bool = False
+

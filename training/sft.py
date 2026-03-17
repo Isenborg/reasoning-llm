@@ -4,14 +4,16 @@ import torch
 import matplotlib.pyplot as plt
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizer, get_cosine_schedule_with_warmup
+
 
 from training.configs import SFTConfig
-from utils.lora import apply_lora, save_lora
+from utils.lora import apply_lora, merge_lora
 from utils.checks import is_correct_answer
 from utils import lmprint
 from utils.models import save_model
 from grpo.utils import generate_prompt, generate_rollouts
+import bitsandbytes as bnb
 
 
 def _collate_fn(batch, pad_token_id: int):
@@ -79,7 +81,13 @@ class SFTTrainer:
             self.model.gradient_checkpointing_enable()
 
         trainable = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = AdamW(trainable, lr=config.lr)
+        if config.use_8bit_optim:
+            self.optimizer = bnb.optim.AdamW8bit(trainable, lr=config.lr)
+        else:
+            self.optimizer = AdamW(trainable, lr=config.lr)
+
+        # Scheduler created later in train() once we know total steps
+        self.scheduler = None
 
         # Loss history for plotting
         self.train_steps: list[int] = []
@@ -104,10 +112,21 @@ class SFTTrainer:
         optimizer_steps_per_epoch = len(dataloader) // G
         total_optimizer_steps = optimizer_steps_per_epoch * self.config.epochs
 
+
+        # Create LR scheduler
+        warmup_steps = int(0.03 * total_optimizer_steps)
+        self.scheduler = get_cosine_schedule_with_warmup(
+            self.optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_optimizer_steps,
+        )
+
         print(f"SFT Training: {self.config.epochs} epochs | "
               f"batch={self.config.batch_size} × accum={G} = effective batch {self.config.batch_size * G} | "
               f"~{total_optimizer_steps} optimizer steps | "
-              f"{len(train_dataset)} examples")
+              f"{len(train_dataset)} examples | "
+              f"LR: {self.config.lr} with cosine schedule ({warmup_steps} warmup steps)")
+        
         if eval_dataset:
             print(f"Evaluating every {self.config.eval_every} optimizer steps "
                   f"on {self.config.eval_samples} samples")
@@ -155,6 +174,7 @@ class SFTTrainer:
                         self.model.parameters(), max_norm=self.config.grad_clip
                     )
                     self.optimizer.step()
+                    self.scheduler.step()
                     self.optimizer.zero_grad()
                     global_step += 1
                     epoch_optimizer_steps += 1
@@ -199,6 +219,8 @@ class SFTTrainer:
             avg_epoch_loss = epoch_loss / max(epoch_optimizer_steps, 1)
             print(f"Epoch {epoch + 1:>2d}/{self.config.epochs} | Avg Loss: {avg_epoch_loss:.4f}")
             print("-" * 50)
+            self._save(run_name + "-epoch-" + str(epoch + 1))
+
 
         # Final eval
         if eval_dataset:
@@ -290,19 +312,23 @@ class SFTTrainer:
         print(f"Training plot saved to {save_path}")
 
     def _save(self, name: str):
-        """Save adapter weights (LoRA) or the full model."""
-        from utils.models import DEFAULT_MODEL_DIR
-        save_path = DEFAULT_MODEL_DIR / name
-        if self.config.use_lora:
-            save_lora(self.model, save_path)
-            self.tokenizer.save_pretrained(save_path)
-        else:
-            save_model(self.model, self.tokenizer, name)
+        """Save the model. If LoRA was used, merge first, then save full model."""
+        from utils.models import save_model
 
-    def _log_step(self, step: int, total_steps: int, loss: float, tok_per_sec: float, eta_seconds: float):
+        model = self.model
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+
+        if self.config.use_lora:
+            merge_lora(model)
+
+        save_model(model, self.tokenizer, name)
+    def _log_step(self, step, total_steps, loss, tok_per_sec, eta_seconds):
         if step % 10 == 0:
+            current_lr = self.scheduler.get_last_lr()[0]
             print(f"  Step {step:>5d}/{total_steps} | Loss: {loss:.4f} | "
-                  f"{tok_per_sec:,.0f} tok/s | ETA: {self._format_eta(eta_seconds)}")
+                f"LR: {current_lr:.2e} | "
+                f"{tok_per_sec:,.0f} tok/s | ETA: {self._format_eta(eta_seconds)}")
 
     def _log_eval(self, step: int, metrics: dict):
         print(
