@@ -6,6 +6,22 @@ Exploring emergent reasoning capabilities in small language models for math solv
 2. **SFT** — Supervised fine-tuning on reasoning traces from a strong model, applied to math questions on the same base model.
 3. **SFT + RL (cold start)** — SFT on reasoning traces first, then applying RL (GRPO) to the fine-tuned model.
 
+## Results
+
+### Reward during GRPO training
+
+![Mean reward over training steps](images/mean_reward.png)
+
+During GRPO, the **per-step reward** (light line) is noisy—individual rollouts swing between roughly 0.2 and 1.0, which is expected when sampling completions. The **smoothed mean reward** (dark line) tells a clearer story: it climbs from about **0.4** at the start to just above **0.9** by **3k steps**, with most of the gain in the first thousand steps and a gentler rise afterward. That pattern is consistent with the policy learning the format-and-correctness objective while variance from sampling remains high throughout.
+
+### GSM8K accuracy: base, SFT-distill, and reasoning model
+
+![GSM8K pass@1 and maj@16 by model](images/barplot.png)
+
+On **GSM8K**, we report **pass@1** (one greedy or single-sample answer) and **maj@16** (majority vote over 16 samples). The **Reasoning** model (SFT cold start + GRPO; orange) leads on both metrics: **82.0%** pass@1 and **88.1%** maj@16. The **SFT-Distill** model (blue) reaches **72.9%** / **82.6%**, and the **Base** model (gray) **53.3%** / **75.9%**. Majority voting helps every checkpoint—especially the base model—but the largest gap is in single-shot accuracy, where the reasoning model is about **9 points** ahead of SFT-distill and **29 points** ahead of the base. Notably, reasoning **pass@1** (82.0%) is already close to SFT-distill **maj@16** (82.6%), which suggests the RL stage is sharpening answers enough that one sample is often enough.
+
+---
+
 ## Getting Started
 
 1. Create and activate a virtual environment (e.g. `rlvr`).
